@@ -16,8 +16,8 @@ Rules:
   - Compulsory square-off at 11:15 PM (INTRADAY_SQUARE_OFF)
   - Each trading day starts FLAT (no overnight positions)
 
-Outputs (never overwrite; dated run folder):
-  output data/YYYY-MM-DD_HH-MM-SS/
+Outputs (never overwrite; dated folder in project root):
+  01-aug-2026/
     supertrend_signals.csv
     paper_trades.csv
     paper_trading_summary.txt
@@ -56,7 +56,7 @@ DEFAULT_LOOKBACK_DAYS = 50
 NO_NEW_ENTRY_AFTER = time(23, 0)  # 11:00 PM — no new entries after this
 SQUARE_OFF_AT = time(23, 15)  # 11:15 PM — compulsory flat
 
-OUTPUT_ROOT = ROOT / "output data"
+OUTPUT_ROOT = ROOT  # dated folders live in the project main folder
 SIGNALS_NAME = "supertrend_signals.csv"
 TRADES_NAME = "paper_trades.csv"
 SUMMARY_NAME = "paper_trading_summary.txt"
@@ -67,12 +67,12 @@ Side = Literal["BUY", "SELL"]
 
 def make_output_dir(now: datetime | None = None) -> Path:
     """
-    Create a dated run folder under 'output data/' and never overwrite.
+    Create a dated subfolder in the project main folder. Never overwrite.
 
-    Example: output data/2026-08-01_16-41-05/
-    If that folder already exists, append _2, _3, ...
+    Example: 01-aug-2026/
+    If that folder already exists, use 01-aug-2026_2, _3, ...
     """
-    stamp = (now or datetime.now()).strftime("%Y-%m-%d_%H-%M-%S")
+    stamp = (now or datetime.now()).strftime("%d-%b-%Y").lower()  # e.g. 01-aug-2026
     base = OUTPUT_ROOT / stamp
     path = base
     suffix = 2

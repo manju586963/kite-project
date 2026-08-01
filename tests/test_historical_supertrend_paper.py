@@ -169,17 +169,15 @@ class IntradayRuleTests(unittest.TestCase):
         first = make_output_dir(fixed)
         second = make_output_dir(fixed)
         try:
-            self.assertTrue(first.name.startswith("2026-08-01_16-41-05"))
-            self.assertTrue(second.name.startswith("2026-08-01_16-41-05"))
+            self.assertEqual(first.name, "01-aug-2026")
+            self.assertEqual(second.name, "01-aug-2026_2")
             self.assertNotEqual(first, second)
             self.assertTrue(first.is_dir())
             self.assertTrue(second.is_dir())
-            self.assertTrue(str(OUTPUT_ROOT).endswith("output data") or OUTPUT_ROOT.name == "output data")
+            self.assertEqual(first.parent, OUTPUT_ROOT)
         finally:
             shutil.rmtree(first, ignore_errors=True)
             shutil.rmtree(second, ignore_errors=True)
-            if OUTPUT_ROOT.exists() and not any(OUTPUT_ROOT.iterdir()):
-                OUTPUT_ROOT.rmdir()
 
 
 if __name__ == "__main__":
