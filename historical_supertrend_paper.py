@@ -16,10 +16,11 @@ Rules:
   - Compulsory square-off at 11:15 PM (INTRADAY_SQUARE_OFF)
   - Each trading day starts FLAT (no overnight positions)
 
-Outputs (project root):
-  supertrend_signals.csv
-  paper_trades.csv
-  paper_trading_summary.txt
+Outputs (never overwrite; dated run folder):
+  output data/YYYY-MM-DD_HH-MM-SS/
+    supertrend_signals.csv
+    paper_trades.csv
+    paper_trading_summary.txt
 """
 
 from __future__ import annotations
@@ -55,13 +56,31 @@ DEFAULT_LOOKBACK_DAYS = 50
 NO_NEW_ENTRY_AFTER = time(23, 0)  # 11:00 PM — no new entries after this
 SQUARE_OFF_AT = time(23, 15)  # 11:15 PM — compulsory flat
 
-SIGNALS_FILE = ROOT / "supertrend_signals.csv"
-TRADES_FILE = ROOT / "paper_trades.csv"
-SUMMARY_FILE = ROOT / "paper_trading_summary.txt"
+OUTPUT_ROOT = ROOT / "output data"
+SIGNALS_NAME = "supertrend_signals.csv"
+TRADES_NAME = "paper_trades.csv"
+SUMMARY_NAME = "paper_trading_summary.txt"
 
 Direction = Literal["bullish", "bearish"]
 Side = Literal["BUY", "SELL"]
 
+
+def make_output_dir(now: datetime | None = None) -> Path:
+    """
+    Create a dated run folder under 'output data/' and never overwrite.
+
+    Example: output data/2026-08-01_16-41-05/
+    If that folder already exists, append _2, _3, ...
+    """
+    stamp = (now or datetime.now()).strftime("%Y-%m-%d_%H-%M-%S")
+    base = OUTPUT_ROOT / stamp
+    path = base
+    suffix = 2
+    while path.exists():
+        path = OUTPUT_ROOT / f"{stamp}_{suffix}"
+        suffix += 1
+    path.mkdir(parents=True, exist_ok=False)
+    return path
 
 # ---------------------------------------------------------------------------
 # Credentials / Kite client
@@ -763,10 +782,15 @@ def main(argv: list[str] | None = None) -> int:
     trades = simulate_paper_trades(rows, lot_size=lot_size)
     stats = summarize_trades(trades)
 
-    write_signals_csv(SIGNALS_FILE, rows, symbol)
-    write_trades_csv(TRADES_FILE, trades, symbol, lot_size)
+    output_dir = make_output_dir()
+    signals_file = output_dir / SIGNALS_NAME
+    trades_file = output_dir / TRADES_NAME
+    summary_file = output_dir / SUMMARY_NAME
+
+    write_signals_csv(signals_file, rows, symbol)
+    write_trades_csv(trades_file, trades, symbol, lot_size)
     write_summary(
-        SUMMARY_FILE,
+        summary_file,
         symbol=symbol,
         token=token,
         lot_size=lot_size,
@@ -780,9 +804,10 @@ def main(argv: list[str] | None = None) -> int:
 
     print()
     print("Done (intraday paper trading only — no real orders).")
-    print(f"  Signals file : {SIGNALS_FILE.name}")
-    print(f"  Trades file  : {TRADES_FILE.name} ({stats['total_trades']} trades)")
-    print(f"  Summary file : {SUMMARY_FILE.name}")
+    print(f"  Output folder: {output_dir}")
+    print(f"  Signals file : {signals_file.name}")
+    print(f"  Trades file  : {trades_file.name} ({stats['total_trades']} trades)")
+    print(f"  Summary file : {summary_file.name}")
     print(f"  Square-offs  : {stats['square_offs']}")
     print(f"  Win rate     : {stats['win_rate_pct']:.2f}%")
     print(f"  Net paper P&L: {stats['net_pnl']:.2f}")

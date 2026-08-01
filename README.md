@@ -128,7 +128,9 @@ python historical_supertrend_paper.py --trading-days 30
 python historical_supertrend_paper.py --from 2026-06-01 --to 2026-08-01
 ```
 
-Outputs written to the project folder:
+Outputs are saved under a dated folder (never overwrites previous runs):
+
+`output data/YYYY-MM-DD_HH-MM-SS/`
 
 - `supertrend_signals.csv` — candles + Supertrend + BUY/SELL marks
 - `paper_trades.csv` — entry/exit, points, lot P&L, square-offs

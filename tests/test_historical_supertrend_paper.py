@@ -18,6 +18,7 @@ from historical_supertrend_paper import (  # noqa: E402
     compute_supertrend,
     filter_last_trading_days,
     is_square_off_candle,
+    make_output_dir,
     simulate_paper_trades,
     summarize_trades,
 )
@@ -159,6 +160,26 @@ class IntradayRuleTests(unittest.TestCase):
         stats = summarize_trades(trades)
         self.assertEqual(stats["square_offs"], 1)
         self.assertEqual(stats["total_trades"], 1)
+
+    def test_output_dir_is_dated_and_unique(self) -> None:
+        import shutil
+        from historical_supertrend_paper import OUTPUT_ROOT
+
+        fixed = datetime(2026, 8, 1, 16, 41, 5)
+        first = make_output_dir(fixed)
+        second = make_output_dir(fixed)
+        try:
+            self.assertTrue(first.name.startswith("2026-08-01_16-41-05"))
+            self.assertTrue(second.name.startswith("2026-08-01_16-41-05"))
+            self.assertNotEqual(first, second)
+            self.assertTrue(first.is_dir())
+            self.assertTrue(second.is_dir())
+            self.assertTrue(str(OUTPUT_ROOT).endswith("output data") or OUTPUT_ROOT.name == "output data")
+        finally:
+            shutil.rmtree(first, ignore_errors=True)
+            shutil.rmtree(second, ignore_errors=True)
+            if OUTPUT_ROOT.exists() and not any(OUTPUT_ROOT.iterdir()):
+                OUTPUT_ROOT.rmdir()
 
 
 if __name__ == "__main__":

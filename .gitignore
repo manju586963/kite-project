@@ -5,6 +5,7 @@ tests/_sample_instruments.csv
 supertrend_signals.csv
 paper_trades.csv
 paper_trading_summary.txt
+output data/
 __pycache__/
 *.py[cod]
 .venv/
