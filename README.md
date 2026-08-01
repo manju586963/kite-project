@@ -32,4 +32,22 @@ If the local callback server cannot bind (or you prefer not to use it), paste th
 python scripts/zerodha_login.py --manual
 ```
 
-After a successful login, `.kite_session.json` contains the `access_token` (valid until ~06:00 IST the next trading day). Re-run the script each trading day to refresh it.
+After a successful login, the access token is saved to `.kite_session.json` and `access_token.txt` (valid until ~06:00 IST the next trading day). Re-run the script each trading day to refresh it.
+
+## Test connection (no orders)
+
+After logging in, verify the session by fetching profile and margins only:
+
+```bash
+python test_connection.py
+```
+
+Expected output:
+
+```text
+Connection successful
+User name: Your Name
+User ID: Your ID
+Broker: ZERODHA
+Available margin data received: True
+```

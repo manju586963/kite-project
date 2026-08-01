@@ -1,5 +1,6 @@
 .env
 .kite_session.json
+access_token.txt
 __pycache__/
 *.py[cod]
 .venv/

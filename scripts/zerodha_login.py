@@ -38,6 +38,7 @@ except ImportError:
 ROOT = Path(__file__).resolve().parents[1]
 ENV_FILE = ROOT / ".env"
 SESSION_FILE = ROOT / ".kite_session.json"
+TOKEN_FILE = ROOT / "access_token.txt"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 
@@ -197,6 +198,15 @@ def save_session(session: dict, path: Path = SESSION_FILE) -> None:
     except OSError:
         pass
 
+    # Also write the bare token for tutorial-style scripts (test_connection.py).
+    access_token = session.get("access_token")
+    if access_token:
+        TOKEN_FILE.write_text(f"{access_token}\n", encoding="utf-8")
+        try:
+            TOKEN_FILE.chmod(0o600)
+        except OSError:
+            pass
+
 
 def login(manual: bool, host: str, port: int) -> dict:
     load_dotenv()
@@ -221,6 +231,7 @@ def login(manual: bool, host: str, port: int) -> dict:
     print(f"  User     : {profile.get('user_name')} ({profile.get('user_id')})")
     print(f"  Email    : {profile.get('email')}")
     print(f"  Session  : {SESSION_FILE}")
+    print(f"  Token    : {TOKEN_FILE}")
     print("  Note     : access_token is valid until ~06:00 IST next trading day")
     return session
 
