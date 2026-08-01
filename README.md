@@ -109,3 +109,27 @@ Connected to Kite.
 Subscribed to: CRUDEOIL26AUGFUT
 ... | CRUDEOIL26AUGFUT | LTP: ... | Volume: ... | OI: ...
 ```
+
+## Historical Supertrend paper trading (Step 5)
+
+Validates Supertrend **(10, 3)** on historical **15-minute** candles for `config.TRADING_SYMBOL`. Paper trading only — **no real orders**.
+
+```bash
+python scripts/zerodha_login.py
+python historical_supertrend_paper.py
+python historical_supertrend_paper.py --days 45
+python historical_supertrend_paper.py --from 2026-06-01 --to 2026-08-01
+```
+
+Outputs written to the project folder:
+
+- `supertrend_signals.csv` — candles + Supertrend + BUY/SELL marks
+- `paper_trades.csv` — entry/exit, points, lot P&L
+- `paper_trading_summary.txt` — totals, win rate, net paper P&L
+
+Offline test with a local candle CSV:
+
+```bash
+python historical_supertrend_paper.py --csv-candles my_candles.csv
+python -m unittest tests.test_historical_supertrend_paper -v
+```

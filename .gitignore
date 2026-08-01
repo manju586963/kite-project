@@ -2,6 +2,9 @@
 .kite_session.json
 access_token.txt
 tests/_sample_instruments.csv
+supertrend_signals.csv
+paper_trades.csv
+paper_trading_summary.txt
 __pycache__/
 *.py[cod]
 .venv/
