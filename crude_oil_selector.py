@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Fixed Crude Oil contract resolver.
+Crude Oil contract resolver + 5-day rollover helpers.
 
-Reads TRADING_SYMBOL from config.py, downloads the Kite instrument master,
-finds that exact MCX contract, and returns its instrument_token (and metadata).
+Fixed mode:
+  Reads TRADING_SYMBOL from config.py and resolves instrument_token.
 
-No rollover logic. No expiry calculations. No automatic contract selection.
-Update config.TRADING_SYMBOL manually when you want to switch months.
+Rollover mode:
+  Builds an MCX CRUDEOIL futures calendar and selects the active contract
+  with a 5-calendar-day pre-expiry roll to the next month.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import json
 import sys
 import urllib.request
 from dataclasses import asdict, dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from io import StringIO
 from pathlib import Path
 
@@ -27,6 +28,22 @@ INSTRUMENTS_URL = "https://api.kite.trade/instruments"
 EXCHANGE = "MCX"
 SEGMENT = "MCX-FUT"
 UNDERLYING = "CRUDEOIL"
+DEFAULT_ROLLOVER_DAYS = 5
+
+MONTH_CODE = {
+    1: "JAN",
+    2: "FEB",
+    3: "MAR",
+    4: "APR",
+    5: "MAY",
+    6: "JUN",
+    7: "JUL",
+    8: "AUG",
+    9: "SEP",
+    10: "OCT",
+    11: "NOV",
+    12: "DEC",
+}
 
 
 @dataclass(frozen=True)
@@ -162,6 +179,224 @@ def resolve_contract(
 
 # Backwards-compatible alias used by earlier imports / docs.
 get_active_crude_oil_contract = resolve_contract
+
+
+@dataclass(frozen=True)
+class ContractMonth:
+    """One CRUDEOIL futures month (may be historical / not in live dump)."""
+
+    tradingsymbol: str
+    expiry: date
+    instrument_token: int | None = None
+    lot_size: int = 1
+
+
+@dataclass(frozen=True)
+class RolloverDay:
+    as_of: date
+    tradingsymbol: str
+    expiry: date
+    month_offset: int  # 0=front, 1=next, ... relative to chain on that day
+
+
+def crude_oil_symbol(year: int, month: int) -> str:
+    return f"CRUDEOIL{year % 100:02d}{MONTH_CODE[month]}FUT"
+
+
+def _adjust_weekday(d: date) -> date:
+    """Move weekend expiries back to Friday."""
+    if d.weekday() == 5:  # Saturday
+        return d - timedelta(days=1)
+    if d.weekday() == 6:  # Sunday
+        return d - timedelta(days=2)
+    return d
+
+
+def estimate_crude_oil_expiry(year: int, month: int) -> date:
+    """
+    Approximate MCX Crude Oil futures expiry (typically ~19th of the month).
+    Live instrument expiries override this when available.
+    """
+    return _adjust_weekday(date(year, month, 19))
+
+
+def iter_year_months(start: date, end: date):
+    y, m = start.year, start.month
+    while (y, m) <= (end.year, end.month):
+        yield y, m
+        if m == 12:
+            y, m = y + 1, 1
+        else:
+            m += 1
+
+
+def list_live_crude_oil_futures(
+    rows: list[dict[str, str]] | None = None,
+) -> list[CrudeOilContract]:
+    """Return live MCX CRUDEOIL futures sorted by expiry."""
+    if rows is None:
+        rows = load_instruments_csv(download_instruments())
+    out: list[CrudeOilContract] = []
+    for row in rows:
+        if row.get("exchange") != EXCHANGE:
+            continue
+        if row.get("segment") != SEGMENT:
+            continue
+        if row.get("name") != UNDERLYING:
+            continue
+        if (row.get("instrument_type") or "").upper() != "FUT":
+            continue
+        expiry = _parse_expiry(row.get("expiry", ""))
+        if expiry is None:
+            continue
+        try:
+            token = int(row["instrument_token"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        lot_size = 1
+        try:
+            lot_size = int(float(row.get("lot_size") or 1))
+        except ValueError:
+            pass
+        out.append(
+            CrudeOilContract(
+                tradingsymbol=row["tradingsymbol"].strip(),
+                instrument_token=token,
+                expiry=expiry,
+                lot_size=lot_size,
+            )
+        )
+    out.sort(key=lambda c: (c.expiry or date.max, c.tradingsymbol))
+    return out
+
+
+def build_contract_calendar(
+    start: date,
+    end: date,
+    *,
+    live: list[CrudeOilContract] | None = None,
+) -> list[ContractMonth]:
+    """
+    Build CRUDEOIL month contracts covering [start, end], including one extra
+    month after end for early rollover.
+    Live instrument expiries/tokens override estimates.
+    """
+    live = live if live is not None else list_live_crude_oil_futures()
+    live_by_symbol = {c.tradingsymbol: c for c in live}
+
+    # Cover through month after `end` so the 5-day roll has a next contract.
+    if end.month == 12:
+        calendar_end = date(end.year + 1, 1, 1)
+    else:
+        calendar_end = date(end.year, end.month + 1, 1)
+
+    contracts: list[ContractMonth] = []
+    for y, m in iter_year_months(date(start.year, start.month, 1), calendar_end):
+        symbol = crude_oil_symbol(y, m)
+        if symbol in live_by_symbol:
+            lc = live_by_symbol[symbol]
+            contracts.append(
+                ContractMonth(
+                    tradingsymbol=symbol,
+                    expiry=lc.expiry or estimate_crude_oil_expiry(y, m),
+                    instrument_token=lc.instrument_token,
+                    lot_size=lc.lot_size,
+                )
+            )
+        else:
+            contracts.append(
+                ContractMonth(
+                    tradingsymbol=symbol,
+                    expiry=estimate_crude_oil_expiry(y, m),
+                    instrument_token=None,
+                    lot_size=1,
+                )
+            )
+    contracts.sort(key=lambda c: c.expiry)
+    return contracts
+
+
+def select_contract_for_date(
+    contracts: list[ContractMonth],
+    as_of: date,
+    *,
+    rollover_days: int = DEFAULT_ROLLOVER_DAYS,
+) -> tuple[ContractMonth, int]:
+    """
+    Pick active contract for as_of with early rollover.
+
+    If nearest expiry is more than rollover_days away → trade it (offset 0).
+    Else → trade next expiry (offset 1).
+    Returns (contract, month_offset).
+    """
+    active = [c for c in contracts if c.expiry >= as_of]
+    if not active:
+        raise ContractLookupError(f"No CRUDEOIL contract available on {as_of}.")
+    nearest = active[0]
+    days_left = (nearest.expiry - as_of).days
+    if days_left > rollover_days:
+        return nearest, 0
+    if len(active) < 2:
+        raise ContractLookupError(
+            f"Need next-month contract to roll {nearest.tradingsymbol} on {as_of}."
+        )
+    return active[1], 1
+
+
+def build_rollover_schedule(
+    start: date,
+    end: date,
+    *,
+    rollover_days: int = DEFAULT_ROLLOVER_DAYS,
+    live: list[CrudeOilContract] | None = None,
+) -> list[RolloverDay]:
+    """Daily schedule of which CRUDEOIL contract to trade."""
+    contracts = build_contract_calendar(start, end, live=live)
+    schedule: list[RolloverDay] = []
+    d = start
+    while d <= end:
+        # Skip weekends for schedule compactness (MCX weekdays).
+        if d.weekday() < 5:
+            contract, offset = select_contract_for_date(
+                contracts, d, rollover_days=rollover_days
+            )
+            schedule.append(
+                RolloverDay(
+                    as_of=d,
+                    tradingsymbol=contract.tradingsymbol,
+                    expiry=contract.expiry,
+                    month_offset=offset,
+                )
+            )
+        d += timedelta(days=1)
+    return schedule
+
+
+def schedule_segments(
+    schedule: list[RolloverDay],
+) -> list[tuple[str, int, date, date]]:
+    """
+    Collapse consecutive days with the same symbol/offset into segments.
+    Returns list of (tradingsymbol, month_offset, from_date, to_date).
+    """
+    if not schedule:
+        return []
+    segments: list[tuple[str, int, date, date]] = []
+    cur_sym = schedule[0].tradingsymbol
+    cur_off = schedule[0].month_offset
+    seg_from = schedule[0].as_of
+    seg_to = schedule[0].as_of
+    for day in schedule[1:]:
+        if day.tradingsymbol == cur_sym and day.month_offset == cur_off:
+            seg_to = day.as_of
+            continue
+        segments.append((cur_sym, cur_off, seg_from, seg_to))
+        cur_sym = day.tradingsymbol
+        cur_off = day.month_offset
+        seg_from = day.as_of
+        seg_to = day.as_of
+    segments.append((cur_sym, cur_off, seg_from, seg_to))
+    return segments
 
 
 def main(argv: list[str] | None = None) -> int:

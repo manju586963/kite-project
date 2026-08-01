@@ -49,7 +49,13 @@ from kiteconnect import KiteConnect
 from openpyxl import Workbook
 
 import config
-from crude_oil_selector import resolve_contract
+from crude_oil_selector import (
+    CrudeOilContract,
+    build_rollover_schedule,
+    list_live_crude_oil_futures,
+    resolve_contract,
+    schedule_segments,
+)
 
 ROOT = Path(__file__).resolve().parent
 ACCESS_TOKEN_FILE = ROOT / "access_token.txt"
@@ -185,6 +191,7 @@ class Candle:
     close: float
     volume: float = 0.0
     oi: float | None = None
+    tradingsymbol: str | None = None
 
 
 @dataclass
@@ -227,6 +234,7 @@ def to_heikin_ashi(candles: Sequence[Candle]) -> list[Candle]:
                 close=ha_close,
                 volume=c.volume,
                 oi=c.oi,
+                tradingsymbol=c.tradingsymbol,
             )
         )
     return ha
@@ -350,6 +358,7 @@ def compute_supertrend(
                 close=c.close,
                 volume=c.volume,
                 oi=c.oi,
+                tradingsymbol=c.tradingsymbol,
                 atr=atr[i],
                 supertrend=st[i],
                 direction=direction[i],
@@ -410,20 +419,19 @@ def simulate_paper_trades(
     *,
     lot_size: int,
     max_loss_points: float = DEFAULT_MAX_LOSS_POINTS,
+    session_rules: bool = True,
 ) -> list[PaperTrade]:
     """
-    Intraday-only paper engine with max-loss square-off.
+    Paper engine with max-loss square-off.
 
-    Per candle:
-      1) Day change → prior day INTRADAY_SQUARE_OFF if still open
-      2) Max-loss stop on high/low (before reversal signal) → MAX_LOSS_STOP
-      3) 11:15 PM compulsory square-off
-      4) Supertrend reversal at close (may open a new position)
+    session_rules=True  (15-minute intraday):
+      - No entries after 11:00 PM
+      - Compulsory square-off at 11:15 PM
+      - Daily FLAT reset
 
-    Stop:
-      LONG  = entry − max_loss_points
-      SHORT = entry + max_loss_points
-      Paper loss capped at max_loss_points × lot_size
+    session_rules=False (rolled continuous day candles):
+      - Hold across days until reverse / max-loss / contract rollover
+      - Square off when tradingsymbol changes (5-day roll)
     """
     if max_loss_points <= 0:
         raise ValueError("max_loss_points must be > 0")
@@ -433,6 +441,7 @@ def simulate_paper_trades(
     next_id = 1
     current_day: date | None = None
     last_row: CandleST | None = None
+    current_symbol: str | None = None
 
     def close_open(exit_time: datetime, exit_price: float, reason: str) -> None:
         nonlocal open_trade
@@ -464,38 +473,51 @@ def simulate_paper_trades(
 
     for row in rows:
         day = trading_day(row.date)
+        sym = getattr(row, "tradingsymbol", None)
 
-        # New calendar trading day → force flat using previous day's last candle.
-        if current_day is None:
-            current_day = day
-        elif day != current_day:
-            if open_trade is not None and last_row is not None:
+        if session_rules:
+            if current_day is None:
+                current_day = day
+            elif day != current_day:
+                if open_trade is not None and last_row is not None:
+                    close_open(
+                        last_row.date,
+                        float(last_row.close),
+                        "INTRADAY_SQUARE_OFF",
+                    )
+                current_day = day
+        else:
+            # Contract rollover → force flat before trading the new month.
+            if (
+                sym
+                and current_symbol
+                and sym != current_symbol
+                and open_trade is not None
+                and last_row is not None
+            ):
                 close_open(
                     last_row.date,
                     float(last_row.close),
-                    "INTRADAY_SQUARE_OFF",
+                    "CONTRACT_ROLLOVER",
                 )
-            current_day = day
+            if sym:
+                current_symbol = sym
 
-        # Max-loss stop BEFORE reversal / session square-off close.
-        # Skip the entry candle (position opens at that candle's close).
         if open_trade is not None and row.date != open_trade.entry_time:
             stop_exit = hit_max_loss_stop(open_trade, row, max_loss_points)
             if stop_exit is not None:
                 close_open(row.date, stop_exit, "MAX_LOSS_STOP")
 
-        # Compulsory square-off candle (11:15 PM+).
-        if is_square_off_candle(row.date):
+        if session_rules and is_square_off_candle(row.date):
             if open_trade is not None:
                 close_open(row.date, float(row.close), "INTRADAY_SQUARE_OFF")
             last_row = row
             continue
 
-        # Supertrend flips only inside the entry window.
-        if row.signal and allows_new_entry(row.date):
+        can_enter = (not session_rules) or allows_new_entry(row.date)
+        if row.signal and can_enter:
             price = float(row.close)
             ts = row.date
-
             if open_trade is None:
                 open_position(row.signal, ts, price, day)
             elif row.signal != open_trade.side:
@@ -505,7 +527,8 @@ def simulate_paper_trades(
         last_row = row
 
     if open_trade is not None and last_row is not None:
-        close_open(last_row.date, float(last_row.close), "INTRADAY_SQUARE_OFF")
+        reason = "INTRADAY_SQUARE_OFF" if session_rules else "EOD_CLOSE"
+        close_open(last_row.date, float(last_row.close), reason)
 
     return trades
 
@@ -527,7 +550,11 @@ def summarize_trades(trades: Sequence[PaperTrade]) -> dict:
     wins = [t for t in closed if (t.pnl or 0) > 0]
     losses = [t for t in closed if (t.pnl or 0) < 0]
     flats = [t for t in closed if (t.pnl or 0) == 0]
-    square_offs = [t for t in closed if t.exit_reason == "INTRADAY_SQUARE_OFF"]
+    square_offs = [
+        t
+        for t in closed
+        if t.exit_reason in ("INTRADAY_SQUARE_OFF", "CONTRACT_ROLLOVER", "EOD_CLOSE")
+    ]
     max_loss_stops = [t for t in closed if t.exit_reason == "MAX_LOSS_STOP"]
     net = sum(t.pnl or 0 for t in closed)
 
@@ -609,6 +636,107 @@ def fetch_historical_15m(
         by_ts[r["date"]] = r
     ordered = [by_ts[k] for k in sorted(by_ts)]
     return candles_from_kite_records(ordered)
+
+
+def fetch_rolled_continuous_daily(
+    kite: KiteConnect,
+    *,
+    start: date,
+    end: date,
+    rollover_days: int = 5,
+) -> tuple[list[Candle], list, list[CrudeOilContract]]:
+    """
+    Build a stitched daily series using Kite continuous futures.
+
+    Expired MCX contracts are not available as 15-minute bars. Kite's
+    continuous=True + interval='day' returns the then-listed month series
+    when given a live month-offset token:
+      offset 0 → front month continuous history
+      offset 1 → next month continuous history (used inside the 5-day roll window)
+
+    Returns (candles, schedule, live_contracts).
+    """
+    live = list_live_crude_oil_futures()
+    if len(live) < 2:
+        raise RuntimeError(
+            "Need at least 2 live CRUDEOIL futures to map front/next continuous offsets."
+        )
+
+    schedule = build_rollover_schedule(
+        start, end, rollover_days=rollover_days, live=live
+    )
+    segments = schedule_segments(schedule)
+    print(f"Rollover schedule: {len(schedule)} weekdays, {len(segments)} segments")
+
+    # Map schedule day → symbol for tagging candles.
+    symbol_by_day = {d.as_of: d.tradingsymbol for d in schedule}
+
+    all_candles: list[Candle] = []
+    for symbol, offset, seg_from, seg_to in segments:
+        if offset >= len(live):
+            raise RuntimeError(
+                f"month_offset={offset} but only {len(live)} live CRUDEOIL contracts."
+            )
+        token = int(live[offset].instrument_token)
+        print(
+            f"  Segment {symbol} (offset {offset} via {live[offset].tradingsymbol}) "
+            f"{seg_from} → {seg_to}"
+        )
+        records = kite.historical_data(
+            token,
+            datetime.combine(seg_from, time(0, 0)),
+            datetime.combine(seg_to, time(23, 59)),
+            "day",
+            continuous=True,
+            oi=True,
+        )
+        for r in records:
+            ts = r["date"] if isinstance(r["date"], datetime) else datetime.fromisoformat(str(r["date"]))
+            d = ts.date()
+            if d < seg_from or d > seg_to:
+                continue
+            all_candles.append(
+                Candle(
+                    date=ts,
+                    open=float(r["open"]),
+                    high=float(r["high"]),
+                    low=float(r["low"]),
+                    close=float(r["close"]),
+                    volume=float(r.get("volume") or 0),
+                    oi=float(r["oi"]) if r.get("oi") is not None else None,
+                    tradingsymbol=symbol_by_day.get(d, symbol),
+                )
+            )
+
+    # De-dupe by date (keep last)
+    by_day: dict[date, Candle] = {}
+    for c in all_candles:
+        by_day[c.date.date()] = c
+    ordered = [by_day[k] for k in sorted(by_day)]
+    return ordered, schedule, live
+
+
+def write_rollover_schedule_csv(path: Path, schedule) -> None:
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(
+            ["date", "tradingsymbol", "expiry", "month_offset", "note"]
+        )
+        for day in schedule:
+            note = (
+                "FRONT"
+                if day.month_offset == 0
+                else "ROLLED_NEXT (within 5 days of expiry)"
+            )
+            writer.writerow(
+                [
+                    day.as_of.isoformat(),
+                    day.tradingsymbol,
+                    day.expiry.isoformat(),
+                    day.month_offset,
+                    note,
+                ]
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1194,6 +1322,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"Max loss in points per trade before square-off "
         f"(default {DEFAULT_MAX_LOSS_POINTS:g})",
     )
+    parser.add_argument(
+        "--rollover-days",
+        type=int,
+        default=0,
+        help=(
+            "If >0, roll to next-month CRUDEOIL futures this many calendar days "
+            "before expiry and fetch continuous day candles (needed for expired "
+            "months). Example: --rollover-days 5 --from 2025-06-01 --to 2026-07-31"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -1222,17 +1360,26 @@ def load_candles_csv(path: Path) -> list[Candle]:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
+    use_rollover = args.rollover_days and args.rollover_days > 0
     symbol = config.TRADING_SYMBOL
+    schedule = []
+    session_rules = not use_rollover
+
     print("========================================")
-    print("INTRADAY SUPERTREND PAPER TRADING")
+    print("SUPERTREND PAPER TRADING")
     print("========================================")
-    print(f"Symbol       : {symbol}")
-    print(f"Interval     : {INTERVAL} (Heikin Ashi)")
+    if use_rollover:
+        print("Mode         : Rolled CRUDEOIL contracts (continuous day)")
+        print(f"Rollover     : {args.rollover_days} days before expiry")
+        print("Interval     : day (Heikin Ashi) — Kite limit for expired months")
+    else:
+        print(f"Symbol       : {symbol}")
+        print(f"Interval     : {INTERVAL} (Heikin Ashi)")
+        print(f"No entries   : after {NO_NEW_ENTRY_AFTER.strftime('%I:%M %p')}")
+        print(f"Square-off   : {SQUARE_OFF_AT.strftime('%I:%M %p')}")
+        print("Overnight    : NOT PERMITTED")
     print(f"Supertrend   : ({ST_PERIOD}, {ST_MULTIPLIER:g}) on HA")
-    print(f"No entries   : after {NO_NEW_ENTRY_AFTER.strftime('%I:%M %p')}")
-    print(f"Square-off   : {SQUARE_OFF_AT.strftime('%I:%M %p')}")
     print(f"Max loss     : {args.max_loss_points:g} points / trade")
-    print("Overnight    : NOT PERMITTED")
     print("Orders       : DISABLED (paper only)")
     print("========================================")
     print()
@@ -1250,6 +1397,34 @@ def main(argv: list[str] | None = None) -> int:
             lot_size = 1
         from_dt = candles[0].date if candles else datetime.now()
         to_dt = candles[-1].date if candles else datetime.now()
+        session_rules = True
+    elif use_rollover:
+        to_dt = (
+            datetime.strptime(args.to_date, "%Y-%m-%d")
+            if args.to_date
+            else datetime(2026, 7, 31)
+        )
+        from_dt = (
+            datetime.strptime(args.from_date, "%Y-%m-%d")
+            if args.from_date
+            else datetime(2025, 6, 1)
+        )
+        kite = make_kite()
+        print(
+            f"Building 5-day rollover series {from_dt.date()} → {to_dt.date()}..."
+        )
+        candles, schedule, live = fetch_rolled_continuous_daily(
+            kite,
+            start=from_dt.date(),
+            end=to_dt.date(),
+            rollover_days=args.rollover_days,
+        )
+        token = int(live[0].instrument_token)
+        lot_size = int(live[0].lot_size)
+        symbol = "CRUDEOIL_ROLLED"
+        # Use full downloaded window (ignore trading-days trim unless set high).
+        if args.trading_days == DEFAULT_TRADING_DAYS:
+            args.trading_days = 10_000
     else:
         print(f"Resolving contract {symbol!r}...")
         contract = resolve_contract()
@@ -1284,7 +1459,6 @@ def main(argv: list[str] | None = None) -> int:
     print("Computing Supertrend (10,1) on Heikin Ashi...")
     all_rows = compute_supertrend(ha_candles, ST_PERIOD, ST_MULTIPLIER)
 
-    # Supertrend uses full history for warm-up; simulate only the test window.
     rows = filter_last_trading_days(all_rows, args.trading_days)
     test_days = sorted({trading_day(r.date) for r in rows})
     print(
@@ -1292,12 +1466,17 @@ def main(argv: list[str] | None = None) -> int:
         f"({len(test_days)} trading days, {len(rows)} candles)"
     )
 
-    print("Simulating intraday paper trades...")
-    signals = [r for r in rows if r.signal and allows_new_entry(r.date)]
+    print("Simulating paper trades...")
+    signals = [
+        r
+        for r in rows
+        if r.signal and ((not session_rules) or allows_new_entry(r.date))
+    ]
     trades = simulate_paper_trades(
         rows,
         lot_size=lot_size,
         max_loss_points=args.max_loss_points,
+        session_rules=session_rules,
     )
     stats = summarize_trades(trades)
 
@@ -1321,6 +1500,26 @@ def main(argv: list[str] | None = None) -> int:
         stats=stats,
         max_loss_points=args.max_loss_points,
     )
+    if schedule:
+        sched_path = unique_file_path(output_dir, "rollover_schedule.csv")
+        write_rollover_schedule_csv(sched_path, schedule)
+        print(f"  Rollover CSV : {sched_path.name}")
+        with summary_file.open("a", encoding="utf-8") as fh:
+            fh.write("\nRollover mode notes:\n")
+            fh.write(
+                f"- Rollover days before expiry : {args.rollover_days}\n"
+            )
+            fh.write(
+                "- Candle source : Kite continuous day futures "
+                "(15-minute bars are unavailable for expired MCX months)\n"
+            )
+            fh.write(
+                "- Positions square off on CONTRACT_ROLLOVER when the "
+                "active month changes\n"
+            )
+            fh.write(f"- Schedule rows : {len(schedule)}\n")
+            fh.write(f"- Schedule file : {sched_path.name}\n")
+
     excel_files = write_monthly_excel(
         output_dir,
         rows,
@@ -1340,7 +1539,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     print()
-    print("Done (intraday paper trading only — no real orders).")
+    print("Done (paper trading only — no real orders).")
     print(f"  Output folder: {output_dir}")
     print(f"  Signals file : {signals_file.name}")
     print(f"  Trades file  : {trades_file.name} ({stats['total_trades']} trades)")

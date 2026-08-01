@@ -110,7 +110,21 @@ Subscribed to: CRUDEOIL26AUGFUT
 ... | CRUDEOIL26AUGFUT | LTP: ... | Volume: ... | OI: ...
 ```
 
-## Historical Supertrend paper trading (Step 5 — Intraday Master)
+## Rolled contracts (Jun 2025 → Jul 2026)
+
+For multi-month history, use a **5-day pre-expiry rollover**. Because Kite does not provide 15-minute bars for expired MCX futures, this mode downloads **continuous day** candles for the front/next month series, converts to Heikin Ashi, runs Supertrend (10,1), and writes the usual summary files plus `rollover_schedule.csv`.
+
+```bash
+python scripts/zerodha_login.py
+python historical_supertrend_paper.py --from 2025-06-01 --to 2026-07-31 --rollover-days 5
+```
+
+Outputs (dated folder):
+
+- `rollover_schedule.csv` — which contract was active each day
+- `consolidated_monthly_summary.xlsx` / `.txt`
+- `monthly/*.xlsx`
+- `paper_trades.csv`, `supertrend_signals.csv`, `paper_trading_summary.txt`
 
 Validates Supertrend **(10, 1)** on historical **15-minute Heikin Ashi** candles for `config.TRADING_SYMBOL` using an **intraday-only** model:
 
