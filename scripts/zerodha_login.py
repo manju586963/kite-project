@@ -174,6 +174,13 @@ def capture_token_manually(login_url: str) -> str:
     return extract_request_token(raw)
 
 
+def _json_safe(value):
+    """Convert values that json.dumps cannot handle (e.g. datetime)."""
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+
 def save_session(session: dict, path: Path = SESSION_FILE) -> None:
     # Persist only what is needed for later API calls; never store api_secret.
     payload = {
@@ -181,7 +188,7 @@ def save_session(session: dict, path: Path = SESSION_FILE) -> None:
         "user_name": session.get("user_name"),
         "email": session.get("email"),
         "access_token": session.get("access_token"),
-        "login_time": session.get("login_time"),
+        "login_time": _json_safe(session.get("login_time")),
         "api_key": os.environ.get("KITE_API_KEY", ""),
     }
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
