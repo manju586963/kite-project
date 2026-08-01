@@ -42,6 +42,40 @@ def _candle(ts: datetime, close: float = 100.0) -> CandleST:
 
 
 class IntradayRuleTests(unittest.TestCase):
+    def test_heikin_ashi_conversion(self) -> None:
+        raw = [
+            Candle(datetime(2026, 8, 1, 10, 0), 100, 110, 90, 105),
+            Candle(datetime(2026, 8, 1, 10, 15), 105, 120, 100, 115),
+        ]
+        ha = to_heikin_ashi(raw)
+        self.assertEqual(len(ha), 2)
+        # First HA close = (100+110+90+105)/4 = 101.25
+        self.assertAlmostEqual(ha[0].close, 101.25)
+        # First HA open = (100+105)/2 = 102.5
+        self.assertAlmostEqual(ha[0].open, 102.5)
+        self.assertAlmostEqual(ha[0].high, max(110, 102.5, 101.25))
+        self.assertAlmostEqual(ha[0].low, min(90, 102.5, 101.25))
+        # Second HA open = (prev_ha_open + prev_ha_close) / 2
+        self.assertAlmostEqual(ha[1].open, (ha[0].open + ha[0].close) / 2)
+        self.assertAlmostEqual(ha[1].close, (105 + 120 + 100 + 115) / 4)
+
+    def test_supertrend_runs_on_heikin_ashi(self) -> None:
+        start = datetime(2026, 7, 1, 10, 0)
+        prices = [(100, 112, 95, 108)] + [
+            (108 + i, 110 + i, 106 + i, 109 + i) for i in range(40)
+        ]
+        raw = [
+            Candle(start + timedelta(minutes=15 * i), o, h, l, c)
+            for i, (o, h, l, c) in enumerate(prices)
+        ]
+        ha = to_heikin_ashi(raw)
+        rows = compute_supertrend(ha, period=10, multiplier=1)
+        self.assertEqual(len(ha), len(raw))
+        self.assertTrue(any(r.direction for r in rows))
+        self.assertAlmostEqual(ha[0].close, (100 + 112 + 95 + 108) / 4)
+        self.assertAlmostEqual(ha[0].open, (100 + 108) / 2)
+        self.assertAlmostEqual(ha[1].open, (ha[0].open + ha[0].close) / 2)
+
     def test_entry_cutoff_and_square_off_times(self) -> None:
         self.assertTrue(allows_new_entry(datetime(2026, 8, 1, 22, 45)))
         self.assertTrue(allows_new_entry(datetime(2026, 8, 1, 23, 0)))
