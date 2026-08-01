@@ -126,6 +126,8 @@ Outputs (dated folder):
 - `monthly/*.xlsx`
 - `paper_trades.csv`, `supertrend_signals.csv`, `paper_trading_summary.txt`
 
+## Historical Supertrend paper trading (15-minute / fixed contract)
+
 Validates Supertrend **(10, 1)** on historical **15-minute Heikin Ashi** candles for `config.TRADING_SYMBOL` using an **intraday-only** model:
 
 - Raw Kite OHLC is converted to Heikin Ashi before Supertrend

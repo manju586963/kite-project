@@ -333,13 +333,34 @@ class IntradayRuleTests(unittest.TestCase):
             )
             names = sorted(p.name for p in files)
             self.assertEqual(names, ["jul-2026.xlsx", "jun-2026.xlsx"])
-            wb = load_workbook(files[0] if files[0].name.startswith("jun") else files[1])
-            # find jun file
             jun = next(p for p in files if p.name.startswith("jun"))
             wb = load_workbook(jun)
             self.assertEqual(set(wb.sheetnames), {"signals", "trades", "summary"})
             self.assertGreater(wb["signals"].max_row, 1)
             self.assertGreater(wb["trades"].max_row, 1)
+
+            stats = summarize_trades(trades)
+            xlsx, txt = write_consolidated_monthly_summary(
+                folder,
+                rows,
+                trades,
+                symbol="CRUDEOIL26AUGFUT",
+                lot_size=1,
+                max_loss_points=125,
+                overall_stats=stats,
+            )
+            self.assertTrue(xlsx.exists())
+            self.assertTrue(txt.exists())
+            cwb = load_workbook(xlsx)
+            self.assertEqual(
+                set(cwb.sheetnames), {"monthly_summary", "all_trades", "daily_pnl"}
+            )
+            # header + 2 months + TOTAL
+            self.assertEqual(cwb["monthly_summary"].max_row, 4)
+            text = txt.read_text(encoding="utf-8")
+            self.assertIn("jun-2026", text)
+            self.assertIn("jul-2026", text)
+            self.assertIn("TOTAL", text)
         finally:
             shutil.rmtree(folder, ignore_errors=True)
 
