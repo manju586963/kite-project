@@ -115,6 +115,7 @@ Subscribed to: CRUDEOIL26AUGFUT
 Validates Supertrend **(10, 1)** on historical **15-minute** candles for `config.TRADING_SYMBOL` using an **intraday-only** model:
 
 - BUY / SELL on Supertrend flips at candle close
+- Max loss per trade: **125 points** (`MAX_LOSS_STOP`; override with `--max-loss-points`)
 - No new entries after **11:00 PM**
 - Compulsory square-off at **11:15 PM** (`INTRADAY_SQUARE_OFF`)
 - Each day starts **FLAT** (no overnight positions)
@@ -124,8 +125,8 @@ Validates Supertrend **(10, 1)** on historical **15-minute** candles for `config
 ```bash
 python scripts/zerodha_login.py
 python historical_supertrend_paper.py
+python historical_supertrend_paper.py --max-loss-points 125
 python historical_supertrend_paper.py --trading-days 30
-python historical_supertrend_paper.py --from 2026-06-01 --to 2026-08-01
 ```
 
 Outputs are saved under a dated folder in the project main folder (never overwrites):

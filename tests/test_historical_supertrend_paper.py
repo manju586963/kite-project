@@ -161,6 +161,69 @@ class IntradayRuleTests(unittest.TestCase):
         stats = summarize_trades(trades)
         self.assertEqual(stats["square_offs"], 1)
         self.assertEqual(stats["total_trades"], 1)
+        self.assertEqual(stats["max_loss_stops"], 0)
+
+    def test_max_loss_stop_long_squares_off(self) -> None:
+        d = datetime(2026, 8, 1)
+        rows = [
+            _candle(d.replace(hour=10, minute=0), 6000),
+            _candle(d.replace(hour=11, minute=0), 5900),  # will set low below stop
+            _candle(d.replace(hour=23, minute=15), 5800),
+        ]
+        rows[0].signal = "BUY"
+        rows[1].signal = None
+        rows[1].low = 6000 - 130  # breaches 125-point stop
+        rows[1].high = 6000 - 10
+        rows[2].signal = None
+
+        trades = simulate_paper_trades(rows, lot_size=2, max_loss_points=125)
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0].exit_reason, "MAX_LOSS_STOP")
+        self.assertEqual(trades[0].stop_price, 5875)
+        self.assertEqual(trades[0].exit_price, 5875)
+        self.assertAlmostEqual(trades[0].points or 0, -125)
+        self.assertAlmostEqual(trades[0].pnl or 0, -250)  # 125 × lot 2
+
+    def test_max_loss_stop_before_reversal_then_reentry(self) -> None:
+        d = datetime(2026, 8, 1)
+        rows = [
+            _candle(d.replace(hour=10, minute=0), 6000),
+            _candle(d.replace(hour=11, minute=0), 5850),
+            _candle(d.replace(hour=23, minute=15), 5860),
+        ]
+        rows[0].signal = "BUY"
+        rows[1].signal = "SELL"  # reversal at close, but stop hits first on OHLC
+        rows[1].low = 5800
+        rows[1].high = 5900
+        rows[1].close = 5850
+        rows[2].signal = None
+
+        trades = simulate_paper_trades(rows, lot_size=1, max_loss_points=125)
+        # Stop closes LONG at 5875, then SELL opens SHORT at 5850 close.
+        self.assertEqual(len(trades), 2)
+        self.assertEqual(trades[0].exit_reason, "MAX_LOSS_STOP")
+        self.assertEqual(trades[0].exit_price, 5875)
+        self.assertEqual(trades[1].side, "SELL")
+        self.assertEqual(trades[1].entry_price, 5850)
+        self.assertEqual(trades[1].exit_reason, "INTRADAY_SQUARE_OFF")
+
+    def test_max_loss_stop_short(self) -> None:
+        d = datetime(2026, 8, 1)
+        rows = [
+            _candle(d.replace(hour=10, minute=0), 6000),
+            _candle(d.replace(hour=12, minute=0), 6150),
+            _candle(d.replace(hour=23, minute=15), 6160),
+        ]
+        rows[0].signal = "SELL"
+        rows[1].signal = None
+        rows[1].high = 6000 + 140
+        rows[1].low = 6010
+        rows[2].signal = None
+
+        trades = simulate_paper_trades(rows, lot_size=1, max_loss_points=125)
+        self.assertEqual(trades[0].exit_reason, "MAX_LOSS_STOP")
+        self.assertEqual(trades[0].exit_price, 6125)
+        self.assertAlmostEqual(trades[0].points or 0, -125)
 
     def test_output_dir_is_dated_and_unique(self) -> None:
         import shutil

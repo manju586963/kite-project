@@ -12,6 +12,8 @@ Rules:
   - SELL when Supertrend flips bullish → bearish (at candle close)
   - BUY  closes SHORT then opens LONG
   - SELL closes LONG then opens SHORT
+  - Max loss per trade: 125 points → square off (MAX_LOSS_STOP)
+  - Stop checked before candle-close reversal signals
   - No new entries after 11:00 PM
   - Compulsory square-off at 11:15 PM (INTRADAY_SQUARE_OFF)
   - Each trading day starts FLAT (no overnight positions)
@@ -51,6 +53,7 @@ ST_MULTIPLIER = 1.0
 DEFAULT_TRADING_DAYS = 30
 # Extra calendar days so Supertrend has warm-up history before the test window.
 DEFAULT_LOOKBACK_DAYS = 50
+DEFAULT_MAX_LOSS_POINTS = 125.0
 
 # Intraday session controls (IST clock on the candle timestamp).
 NO_NEW_ENTRY_AFTER = time(23, 0)  # 11:00 PM — no new entries after this
@@ -321,6 +324,7 @@ class PaperTrade:
     entry_time: datetime
     entry_price: float
     trade_date: date | None = None
+    stop_price: float | None = None
     exit_time: datetime | None = None
     exit_price: float | None = None
     points: float | None = None
@@ -328,19 +332,57 @@ class PaperTrade:
     exit_reason: str | None = None
 
 
+def stop_price_for(side: Side, entry_price: float, max_loss_points: float) -> float:
+    """LONG: entry − N points. SHORT: entry + N points."""
+    if side == "BUY":
+        return entry_price - max_loss_points
+    return entry_price + max_loss_points
+
+
+def hit_max_loss_stop(
+    trade: PaperTrade,
+    candle: CandleST,
+    max_loss_points: float,
+) -> float | None:
+    """
+    If candle high/low touches the stop, return the exact stop fill price.
+    Gaps/slippage are excluded (fills at stop).
+    """
+    stop = trade.stop_price
+    if stop is None:
+        stop = stop_price_for(trade.side, trade.entry_price, max_loss_points)
+    if trade.side == "BUY":
+        if float(candle.low) <= stop:
+            return stop
+    else:
+        if float(candle.high) >= stop:
+            return stop
+    return None
+
+
 def simulate_paper_trades(
     rows: Sequence[CandleST],
     *,
     lot_size: int,
+    max_loss_points: float = DEFAULT_MAX_LOSS_POINTS,
 ) -> list[PaperTrade]:
     """
-    Intraday-only paper engine.
+    Intraday-only paper engine with max-loss square-off.
 
-    Each trading day starts FLAT (previous Supertrend position is not carried).
-    Signals during the entry window flip/reverse the position.
-    After 11:00 PM: no new entries (signals ignored).
-    At 11:15 PM (or last candle of the day): compulsory INTRADAY_SQUARE_OFF.
+    Per candle:
+      1) Day change → prior day INTRADAY_SQUARE_OFF if still open
+      2) Max-loss stop on high/low (before reversal signal) → MAX_LOSS_STOP
+      3) 11:15 PM compulsory square-off
+      4) Supertrend reversal at close (may open a new position)
+
+    Stop:
+      LONG  = entry − max_loss_points
+      SHORT = entry + max_loss_points
+      Paper loss capped at max_loss_points × lot_size
     """
+    if max_loss_points <= 0:
+        raise ValueError("max_loss_points must be > 0")
+
     trades: list[PaperTrade] = []
     open_trade: PaperTrade | None = None
     next_id = 1
@@ -363,6 +405,18 @@ def simulate_paper_trades(
         trades.append(open_trade)
         open_trade = None
 
+    def open_position(side: Side, ts: datetime, price: float, day: date) -> None:
+        nonlocal open_trade, next_id
+        open_trade = PaperTrade(
+            trade_id=next_id,
+            side=side,
+            entry_time=ts,
+            entry_price=price,
+            trade_date=day,
+            stop_price=stop_price_for(side, price, max_loss_points),
+        )
+        next_id += 1
+
     for row in rows:
         day = trading_day(row.date)
 
@@ -377,7 +431,13 @@ def simulate_paper_trades(
                     "INTRADAY_SQUARE_OFF",
                 )
             current_day = day
-            # Daily reset: position is FLAT; do not inherit prior day stance.
+
+        # Max-loss stop BEFORE reversal / session square-off close.
+        # Skip the entry candle (position opens at that candle's close).
+        if open_trade is not None and row.date != open_trade.entry_time:
+            stop_exit = hit_max_loss_stop(open_trade, row, max_loss_points)
+            if stop_exit is not None:
+                close_open(row.date, stop_exit, "MAX_LOSS_STOP")
 
         # Compulsory square-off candle (11:15 PM+).
         if is_square_off_candle(row.date):
@@ -386,36 +446,19 @@ def simulate_paper_trades(
             last_row = row
             continue
 
-        # Act on Supertrend flips only inside the entry window.
+        # Supertrend flips only inside the entry window.
         if row.signal and allows_new_entry(row.date):
             price = float(row.close)
             ts = row.date
 
             if open_trade is None:
-                open_trade = PaperTrade(
-                    trade_id=next_id,
-                    side=row.signal,
-                    entry_time=ts,
-                    entry_price=price,
-                    trade_date=day,
-                )
-                next_id += 1
+                open_position(row.signal, ts, price, day)
             elif row.signal != open_trade.side:
-                # Close existing, then open the opposite side.
                 close_open(ts, price, f"FLIP_{row.signal}")
-                open_trade = PaperTrade(
-                    trade_id=next_id,
-                    side=row.signal,
-                    entry_time=ts,
-                    entry_price=price,
-                    trade_date=day,
-                )
-                next_id += 1
-            # Same-side signal while already in that direction → ignore.
+                open_position(row.signal, ts, price, day)
 
         last_row = row
 
-    # End of series: never carry overnight.
     if open_trade is not None and last_row is not None:
         close_open(last_row.date, float(last_row.close), "INTRADAY_SQUARE_OFF")
 
@@ -440,6 +483,7 @@ def summarize_trades(trades: Sequence[PaperTrade]) -> dict:
     losses = [t for t in closed if (t.pnl or 0) < 0]
     flats = [t for t in closed if (t.pnl or 0) == 0]
     square_offs = [t for t in closed if t.exit_reason == "INTRADAY_SQUARE_OFF"]
+    max_loss_stops = [t for t in closed if t.exit_reason == "MAX_LOSS_STOP"]
     net = sum(t.pnl or 0 for t in closed)
 
     by_day: dict[date, float] = {}
@@ -453,6 +497,7 @@ def summarize_trades(trades: Sequence[PaperTrade]) -> dict:
         "losses": len(losses),
         "flats": len(flats),
         "square_offs": len(square_offs),
+        "max_loss_stops": len(max_loss_stops),
         "trading_days": len(by_day),
         "win_rate_pct": (len(wins) / len(closed) * 100.0) if closed else 0.0,
         "net_pnl": net,
@@ -580,6 +625,7 @@ def write_trades_csv(
                 "position",
                 "entry_time",
                 "entry_price",
+                "stop_price",
                 "exit_time",
                 "exit_price",
                 "points",
@@ -598,6 +644,7 @@ def write_trades_csv(
                     "LONG" if t.side == "BUY" else "SHORT",
                     t.entry_time.isoformat(),
                     t.entry_price,
+                    "" if t.stop_price is None else t.stop_price,
                     "" if t.exit_time is None else t.exit_time.isoformat(),
                     "" if t.exit_price is None else t.exit_price,
                     "" if t.points is None else round(t.points, 4),
@@ -620,6 +667,7 @@ def write_summary(
     signal_count: int,
     trades: Sequence[PaperTrade],
     stats: dict,
+    max_loss_points: float = DEFAULT_MAX_LOSS_POINTS,
 ) -> None:
     lines = [
         "Intraday Supertrend Paper Trading Summary",
@@ -630,6 +678,8 @@ def write_summary(
         f"Interval            : {INTERVAL}",
         f"Supertrend          : ({ST_PERIOD}, {ST_MULTIPLIER:g})",
         f"Style               : Intraday (daily square-off)",
+        f"Max loss / trade    : {max_loss_points:g} points "
+        f"(max paper loss {max_loss_points:g} × lot_size)",
         f"No new entries after: {NO_NEW_ENTRY_AFTER.strftime('%I:%M %p')}",
         f"Compulsory exit     : {SQUARE_OFF_AT.strftime('%I:%M %p')} (INTRADAY_SQUARE_OFF)",
         f"Lot size            : {lot_size}",
@@ -643,6 +693,7 @@ def write_summary(
         f"Wins                : {stats['wins']}",
         f"Losses              : {stats['losses']}",
         f"Flats               : {stats['flats']}",
+        f"Max-loss stops      : {stats['max_loss_stops']}",
         f"Square-offs         : {stats['square_offs']}",
         f"Win rate            : {stats['win_rate_pct']:.2f}%",
         f"Gross profit        : {stats['gross_profit']:.2f}",
@@ -651,9 +702,11 @@ def write_summary(
         "",
         "Notes:",
         "- Paper trading only. No real orders were placed.",
-        "- Entry/exit prices use the close of the completed 15-minute candle.",
-        "- Each day starts FLAT; overnight Supertrend stance is not carried as a position.",
-        "- Forced exits are recorded as INTRADAY_SQUARE_OFF.",
+        "- Entry uses signal candle close; MAX_LOSS_STOP fills exactly at the stop price.",
+        "- LONG stop = entry − max-loss points; SHORT stop = entry + max-loss points.",
+        "- Stop-loss is checked before candle-close reversal signals.",
+        "- Each day starts FLAT; overnight positions are not permitted.",
+        "- Forced session exits are recorded as INTRADAY_SQUARE_OFF.",
         "- P&L = points × lot_size (from the instrument master).",
         "",
     ]
@@ -702,6 +755,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Optional local candles CSV (datetime,open,high,low,close[,volume]) "
         "to run without calling Kite historical API",
     )
+    parser.add_argument(
+        "--max-loss-points",
+        type=float,
+        default=DEFAULT_MAX_LOSS_POINTS,
+        help=f"Max loss in points per trade before square-off "
+        f"(default {DEFAULT_MAX_LOSS_POINTS:g})",
+    )
     return parser.parse_args(argv)
 
 
@@ -739,6 +799,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Supertrend   : ({ST_PERIOD}, {ST_MULTIPLIER:g})")
     print(f"No entries   : after {NO_NEW_ENTRY_AFTER.strftime('%I:%M %p')}")
     print(f"Square-off   : {SQUARE_OFF_AT.strftime('%I:%M %p')}")
+    print(f"Max loss     : {args.max_loss_points:g} points / trade")
     print("Overnight    : NOT PERMITTED")
     print("Orders       : DISABLED (paper only)")
     print("========================================")
@@ -799,7 +860,11 @@ def main(argv: list[str] | None = None) -> int:
 
     print("Simulating intraday paper trades...")
     signals = [r for r in rows if r.signal and allows_new_entry(r.date)]
-    trades = simulate_paper_trades(rows, lot_size=lot_size)
+    trades = simulate_paper_trades(
+        rows,
+        lot_size=lot_size,
+        max_loss_points=args.max_loss_points,
+    )
     stats = summarize_trades(trades)
 
     output_dir = make_output_dir()
@@ -820,6 +885,7 @@ def main(argv: list[str] | None = None) -> int:
         signal_count=len(signals),
         trades=trades,
         stats=stats,
+        max_loss_points=args.max_loss_points,
     )
 
     print()
@@ -828,6 +894,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Signals file : {signals_file.name}")
     print(f"  Trades file  : {trades_file.name} ({stats['total_trades']} trades)")
     print(f"  Summary file : {summary_file.name}")
+    print(f"  Max-loss stops: {stats['max_loss_stops']}")
     print(f"  Square-offs  : {stats['square_offs']}")
     print(f"  Win rate     : {stats['win_rate_pct']:.2f}%")
     print(f"  Net paper P&L: {stats['net_pnl']:.2f}")
