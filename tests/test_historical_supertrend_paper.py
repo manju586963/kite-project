@@ -24,6 +24,7 @@ from historical_supertrend_paper import (  # noqa: E402
     to_heikin_ashi,
     unique_file_path,
     write_monthly_excel,
+    write_consolidated_monthly_summary,
 )
 
 

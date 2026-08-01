@@ -140,6 +140,8 @@ Inside each folder, filenames are also kept unique (`supertrend_signals_2.csv`, 
 - `paper_trades.csv` — entry/exit, points, lot P&L, square-offs
 - `paper_trading_summary.txt` — totals, win rate, daily & net paper P&L
 - `monthly/jun-2025.xlsx`, `monthly/jul-2025.xlsx`, … — one Excel workbook per month with sheets `signals`, `trades`, `summary`
+- `consolidated_monthly_summary.xlsx` — all months in one file (`monthly_summary`, `all_trades`, `daily_pnl`)
+- `consolidated_monthly_summary.txt` — printable month-by-month totals
 
 Offline test with a local candle CSV:
 

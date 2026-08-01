@@ -28,6 +28,8 @@ Outputs (never overwrite; dated folder in project root):
       jun-2025.xlsx
       jul-2025.xlsx
       ...
+    consolidated_monthly_summary.xlsx
+    consolidated_monthly_summary.txt
 """
 
 from __future__ import annotations
@@ -872,6 +874,218 @@ def write_monthly_excel(
     return written
 
 
+def write_consolidated_monthly_summary(
+    output_dir: Path,
+    rows: Sequence[CandleST],
+    trades: Sequence[PaperTrade],
+    *,
+    symbol: str,
+    lot_size: int,
+    max_loss_points: float,
+    overall_stats: dict,
+) -> tuple[Path, Path]:
+    """
+    Consolidate all months into one summary Excel + one text file.
+
+    Excel sheets:
+      - monthly_summary : one row per month + TOTAL
+      - all_trades      : every paper trade
+      - daily_pnl       : daily realised P&L across the run
+    """
+    rows_by_month: dict[str, list[CandleST]] = {}
+    for r in rows:
+        rows_by_month.setdefault(_month_key(r.date), []).append(r)
+
+    trades_by_month: dict[str, list[PaperTrade]] = {}
+    for t in trades:
+        d = t.trade_date or trading_day(t.entry_time)
+        trades_by_month.setdefault(_month_key(d), []).append(t)
+
+    months = sorted(set(rows_by_month) | set(trades_by_month))
+
+    xlsx_path = unique_file_path(output_dir, "consolidated_monthly_summary.xlsx")
+    txt_path = unique_file_path(output_dir, "consolidated_monthly_summary.txt")
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "monthly_summary"
+    headers = [
+        "month",
+        "candles",
+        "signals",
+        "trades",
+        "wins",
+        "losses",
+        "flats",
+        "max_loss_stops",
+        "square_offs",
+        "win_rate_pct",
+        "gross_profit",
+        "gross_loss",
+        "net_pnl",
+    ]
+    ws.append(headers)
+
+    txt_lines = [
+        "Consolidated Monthly Paper Trading Summary",
+        "==========================================",
+        "",
+        f"Symbol           : {symbol}",
+        f"Supertrend       : ({ST_PERIOD}, {ST_MULTIPLIER:g}) on Heikin Ashi",
+        f"Max loss points  : {max_loss_points:g}",
+        f"Lot size         : {lot_size}",
+        f"Overall trades   : {overall_stats['total_trades']}",
+        f"Overall win rate : {overall_stats['win_rate_pct']:.2f}%",
+        f"Overall net P&L  : {overall_stats['net_pnl']:.2f}",
+        "",
+        f"{'Month':<12} {'Trades':>7} {'Wins':>6} {'Losses':>7} "
+        f"{'Stops':>6} {'SqOff':>6} {'Win%':>8} {'Net P&L':>12}",
+        "-" * 72,
+    ]
+
+    totals = {
+        "candles": 0,
+        "signals": 0,
+        "trades": 0,
+        "wins": 0,
+        "losses": 0,
+        "flats": 0,
+        "max_loss_stops": 0,
+        "square_offs": 0,
+        "gross_profit": 0.0,
+        "gross_loss": 0.0,
+        "net_pnl": 0.0,
+    }
+
+    for month in months:
+        year_s, month_s = month.split("-")
+        label = _month_label(int(year_s), int(month_s))
+        month_rows = rows_by_month.get(month, [])
+        month_trades = trades_by_month.get(month, [])
+        st = summarize_trades(month_trades)
+        sig_count = len(
+            [r for r in month_rows if r.signal and allows_new_entry(r.date)]
+        )
+
+        row_vals = [
+            label,
+            len(month_rows),
+            sig_count,
+            st["total_trades"],
+            st["wins"],
+            st["losses"],
+            st["flats"],
+            st["max_loss_stops"],
+            st["square_offs"],
+            round(st["win_rate_pct"], 2),
+            round(st["gross_profit"], 2),
+            round(st["gross_loss"], 2),
+            round(st["net_pnl"], 2),
+        ]
+        ws.append(row_vals)
+
+        totals["candles"] += len(month_rows)
+        totals["signals"] += sig_count
+        totals["trades"] += st["total_trades"]
+        totals["wins"] += st["wins"]
+        totals["losses"] += st["losses"]
+        totals["flats"] += st["flats"]
+        totals["max_loss_stops"] += st["max_loss_stops"]
+        totals["square_offs"] += st["square_offs"]
+        totals["gross_profit"] += st["gross_profit"]
+        totals["gross_loss"] += st["gross_loss"]
+        totals["net_pnl"] += st["net_pnl"]
+
+        txt_lines.append(
+            f"{label:<12} {st['total_trades']:>7} {st['wins']:>6} {st['losses']:>7} "
+            f"{st['max_loss_stops']:>6} {st['square_offs']:>6} "
+            f"{st['win_rate_pct']:>7.2f}% {st['net_pnl']:>12.2f}"
+        )
+
+    overall_win = (
+        (totals["wins"] / totals["trades"] * 100.0) if totals["trades"] else 0.0
+    )
+    ws.append(
+        [
+            "TOTAL",
+            totals["candles"],
+            totals["signals"],
+            totals["trades"],
+            totals["wins"],
+            totals["losses"],
+            totals["flats"],
+            totals["max_loss_stops"],
+            totals["square_offs"],
+            round(overall_win, 2),
+            round(totals["gross_profit"], 2),
+            round(totals["gross_loss"], 2),
+            round(totals["net_pnl"], 2),
+        ]
+    )
+    txt_lines.append("-" * 72)
+    txt_lines.append(
+        f"{'TOTAL':<12} {totals['trades']:>7} {totals['wins']:>6} {totals['losses']:>7} "
+        f"{totals['max_loss_stops']:>6} {totals['square_offs']:>6} "
+        f"{overall_win:>7.2f}% {totals['net_pnl']:>12.2f}"
+    )
+    txt_lines.append("")
+
+    # all_trades sheet
+    ws_tr = wb.create_sheet("all_trades")
+    ws_tr.append(
+        [
+            "month",
+            "trade_id",
+            "trade_date",
+            "symbol",
+            "side",
+            "position",
+            "entry_time",
+            "entry_price",
+            "stop_price",
+            "exit_time",
+            "exit_price",
+            "points",
+            "lot_size",
+            "pnl",
+            "exit_reason",
+        ]
+    )
+    for t in trades:
+        d = t.trade_date or trading_day(t.entry_time)
+        label = _month_label(d.year, d.month)
+        ws_tr.append(
+            [
+                label,
+                t.trade_id,
+                d.isoformat(),
+                symbol,
+                t.side,
+                "LONG" if t.side == "BUY" else "SHORT",
+                t.entry_time.isoformat(),
+                t.entry_price,
+                t.stop_price,
+                None if t.exit_time is None else t.exit_time.isoformat(),
+                t.exit_price,
+                None if t.points is None else round(t.points, 4),
+                lot_size,
+                None if t.pnl is None else round(t.pnl, 4),
+                t.exit_reason or "",
+            ]
+        )
+
+    # daily_pnl sheet
+    ws_day = wb.create_sheet("daily_pnl")
+    ws_day.append(["month", "date", "pnl"])
+    daily = overall_stats.get("daily_pnl") or {}
+    for d, pnl in daily.items():
+        ws_day.append([_month_label(d.year, d.month), d.isoformat(), round(pnl, 2)])
+
+    wb.save(xlsx_path)
+    txt_path.write_text("\n".join(txt_lines) + "\n", encoding="utf-8")
+    return xlsx_path, txt_path
+
+
 def write_summary(
     path: Path,
     *,
@@ -1115,6 +1329,15 @@ def main(argv: list[str] | None = None) -> int:
         lot_size=lot_size,
         max_loss_points=args.max_loss_points,
     )
+    consolidated_xlsx, consolidated_txt = write_consolidated_monthly_summary(
+        output_dir,
+        rows,
+        trades,
+        symbol=symbol,
+        lot_size=lot_size,
+        max_loss_points=args.max_loss_points,
+        overall_stats=stats,
+    )
 
     print()
     print("Done (intraday paper trading only — no real orders).")
@@ -1125,6 +1348,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Monthly Excel: {len(excel_files)} file(s) in {output_dir / 'monthly'}")
     for xf in excel_files:
         print(f"    - {xf.relative_to(output_dir)}")
+    print(f"  Consolidated : {consolidated_xlsx.name}")
+    print(f"  Consolidated : {consolidated_txt.name}")
     print(f"  Max-loss stops: {stats['max_loss_stops']}")
     print(f"  Square-offs  : {stats['square_offs']}")
     print(f"  Win rate     : {stats['win_rate_pct']:.2f}%")
