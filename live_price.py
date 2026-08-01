@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Step 3 — Live price feed for the fixed MCX Crude Oil futures contract.
+Step 3 — Live price feed for MCX CRUDEOIL August 2026 futures.
 
-- Resolves the contract from config.TRADING_SYMBOL via crude_oil_selector
-  (looks up instrument_token from the live Kite instrument list; never
-  hard-codes the token).
-- Streams LTP, volume, and open interest over KiteTicker.
+- Finds the August 2026 CRUDEOIL contract from Kite's instrument list
+  (instrument_token is looked up live; never permanently hard-coded).
+- Displays live LTP, volume, and open interest.
 - Places no paper or real orders.
 
 Usage:
-  python scripts/zerodha_login.py   # once per trading day
+  python scripts/zerodha_login.py
   python live_price.py
   Ctrl+C to stop
 """
@@ -23,155 +22,217 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
-from kiteconnect import KiteTicker
+from kiteconnect import KiteConnect, KiteTicker
 
-import config
-from crude_oil_selector import resolve_contract
+# =========================================================
+# FIXED CONTRACT (August 2026)
+# Prefer config.TRADING_SYMBOL when set; otherwise year/month match.
+# =========================================================
+try:
+    import config as app_config
+
+    CONFIG_TRADING_SYMBOL = getattr(app_config, "TRADING_SYMBOL", "").strip()
+except ImportError:
+    CONFIG_TRADING_SYMBOL = ""
+
+CONTRACT_NAME = "CRUDEOIL"
+CONTRACT_YEAR = 2026
+CONTRACT_MONTH = 8  # August
 
 ROOT = Path(__file__).resolve().parent
 ACCESS_TOKEN_FILE = ROOT / "access_token.txt"
 SESSION_FILE = ROOT / ".kite_session.json"
 
+# =========================================================
+# LOAD KITE CREDENTIALS
+# =========================================================
+load_dotenv(ROOT / ".env")
 
-def load_access_token() -> str:
-    if ACCESS_TOKEN_FILE.exists():
-        token = ACCESS_TOKEN_FILE.read_text(encoding="utf-8").strip()
-        if token:
-            return token
+api_key = os.getenv("KITE_API_KEY", "").strip()
+if not api_key and SESSION_FILE.exists():
+    api_key = (
+        json.loads(SESSION_FILE.read_text(encoding="utf-8")).get("api_key") or ""
+    ).strip()
 
-    if SESSION_FILE.exists():
-        data = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
-        token = (data.get("access_token") or "").strip()
-        if token:
-            return token
-
-    raise RuntimeError(
-        "access_token.txt was not found. "
-        "Complete today's Zerodha login first (python scripts/zerodha_login.py)."
-    )
-
-
-def load_api_key() -> str:
-    load_dotenv(ROOT / ".env")
-    api_key = os.getenv("KITE_API_KEY", "").strip()
-    if api_key:
-        return api_key
-
-    if SESSION_FILE.exists():
-        data = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
-        api_key = (data.get("api_key") or "").strip()
-        if api_key:
-            return api_key
-
+if not api_key:
     raise RuntimeError("KITE_API_KEY is missing from the .env file.")
 
+access_token = ""
+if ACCESS_TOKEN_FILE.exists():
+    access_token = ACCESS_TOKEN_FILE.read_text(encoding="utf-8").strip()
+elif SESSION_FILE.exists():
+    access_token = (
+        json.loads(SESSION_FILE.read_text(encoding="utf-8")).get("access_token") or ""
+    ).strip()
 
-def print_contract_banner(contract) -> None:
-    print()
-    print("========================================")
-    print("MCX CRUDEOIL LIVE PRICE")
-    print("========================================")
-    print("Contract         :", contract.tradingsymbol)
-    print("Expiry           :", contract.expiry)
-    print("Instrument token :", contract.instrument_token)
-    print("Lot size         :", contract.lot_size)
-    print("Tick size        :", contract.tick_size)
-    print("Orders           : DISABLED")
-    print("========================================")
-    print()
-    print("Press Ctrl + C to stop.")
-    print()
-
-
-def main() -> int:
-    api_key = load_api_key()
-    access_token = load_access_token()
-
-    print(
-        f"Resolving fixed contract from config.TRADING_SYMBOL="
-        f"{config.TRADING_SYMBOL!r} ..."
-    )
-    contract = resolve_contract()
-    tokens = [int(contract.instrument_token)]
-    trading_symbol = contract.tradingsymbol
-
-    print_contract_banner(contract)
-
-    ticker = KiteTicker(
-        api_key,
-        access_token,
-        reconnect=True,
-        reconnect_max_tries=50,
-        reconnect_max_delay=60,
+if not access_token:
+    raise RuntimeError(
+        "access_token.txt was not found. "
+        "Complete today's Zerodha login first "
+        "(python scripts/zerodha_login.py)."
     )
 
-    def on_connect(ws, response):
-        print("Connected to Kite.")
-        print("Subscribed to:", trading_symbol)
-        print()
-        ws.subscribe(tokens)
-        ws.set_mode(ws.MODE_FULL, tokens)
+# =========================================================
+# CONNECT TO KITE
+# =========================================================
+kite = KiteConnect(api_key=api_key)
+kite.set_access_token(access_token)
 
-    def on_ticks(ws, ticks):
-        for tick in ticks:
-            last_price = tick.get("last_price")
-            volume = tick.get("volume_traded")
-            open_interest = tick.get("oi")
-            timestamp = tick.get("exchange_timestamp")
-            print(
-                f"{timestamp} | "
-                f"{trading_symbol} | "
-                f"LTP: {last_price} | "
-                f"Volume: {volume} | "
-                f"OI: {open_interest}"
-            )
 
-    def on_error(ws, code, reason):
-        print()
-        print("WebSocket error:", code, reason)
+# =========================================================
+# FIND AUGUST CRUDEOIL FUTURES
+# =========================================================
+def find_contract():
+    print("Downloading MCX instruments...")
+    instruments = kite.instruments("MCX")
+    matches = []
 
-    def on_close(ws, code, reason):
-        print()
-        print("WebSocket closed:", code, reason)
+    for instrument in instruments:
+        name = str(instrument.get("name", "")).upper()
+        instrument_type = str(instrument.get("instrument_type", "")).upper()
+        expiry = instrument.get("expiry")
+        tradingsymbol = str(instrument.get("tradingsymbol", "")).strip()
 
-    def on_reconnect(ws, attempt):
-        print("Reconnecting. Attempt:", attempt)
+        if not expiry:
+            continue
+        if name != CONTRACT_NAME:
+            continue
+        if instrument_type != "FUT":
+            continue
 
-    def on_noreconnect(ws):
-        print("Maximum reconnection attempts reached.")
+        # Prefer exact symbol from config.py when provided.
+        if CONFIG_TRADING_SYMBOL:
+            if tradingsymbol == CONFIG_TRADING_SYMBOL:
+                matches.append(instrument)
+            continue
 
-    def stop_program(signum=None, frame=None):
-        print()
-        print("Stopping live price feed...")
-        try:
-            ticker.close()
-        except Exception:
-            pass
-        sys.exit(0)
+        if expiry.year == CONTRACT_YEAR and expiry.month == CONTRACT_MONTH:
+            matches.append(instrument)
 
-    ticker.on_connect = on_connect
-    ticker.on_ticks = on_ticks
-    ticker.on_error = on_error
-    ticker.on_close = on_close
-    ticker.on_reconnect = on_reconnect
-    ticker.on_noreconnect = on_noreconnect
+    if not matches:
+        target = CONFIG_TRADING_SYMBOL or (
+            f"{CONTRACT_NAME} {CONTRACT_YEAR}-{CONTRACT_MONTH:02d}"
+        )
+        raise RuntimeError(
+            f"MCX CRUDEOIL contract was not found ({target}). "
+            "Check config.TRADING_SYMBOL / contract month."
+        )
 
-    signal.signal(signal.SIGINT, stop_program)
+    matches.sort(key=lambda item: item["expiry"])
+    if len(matches) > 1:
+        print(
+            "Warning: More than one matching contract was found. "
+            "The earliest expiry was selected."
+        )
+    return matches[0]
 
+
+contract = find_contract()
+instrument_token = int(contract["instrument_token"])
+trading_symbol = contract["tradingsymbol"]
+expiry = contract["expiry"]
+lot_size = int(contract["lot_size"])
+tick_size = float(contract["tick_size"])
+tokens = [instrument_token]
+
+# =========================================================
+# DISPLAY CONTRACT
+# =========================================================
+print()
+print("========================================")
+print("MCX CRUDEOIL LIVE PRICE")
+print("========================================")
+print("Contract         :", trading_symbol)
+print("Expiry           :", expiry)
+print("Instrument token :", instrument_token)
+print("Lot size         :", lot_size)
+print("Tick size        :", tick_size)
+print("Orders           : DISABLED")
+print("========================================")
+print()
+print("Press Ctrl + C to stop.")
+print()
+
+# =========================================================
+# WEBSOCKET
+# =========================================================
+ticker = KiteTicker(
+    api_key,
+    access_token,
+    reconnect=True,
+    reconnect_max_tries=50,
+    reconnect_max_delay=60,
+)
+
+
+def on_connect(ws, response):
+    print("Connected to Kite.")
+    print("Subscribed to:", trading_symbol)
+    print()
+    ws.subscribe(tokens)
+    ws.set_mode(ws.MODE_FULL, tokens)
+
+
+def on_ticks(ws, ticks):
+    for tick in ticks:
+        last_price = tick.get("last_price")
+        volume = tick.get("volume_traded")
+        open_interest = tick.get("oi")
+        timestamp = tick.get("exchange_timestamp")
+        print(
+            f"{timestamp} | "
+            f"{trading_symbol} | "
+            f"LTP: {last_price} | "
+            f"Volume: {volume} | "
+            f"OI: {open_interest}"
+        )
+
+
+def on_error(ws, code, reason):
+    print()
+    print("WebSocket error:", code, reason)
+
+
+def on_close(ws, code, reason):
+    print()
+    print("WebSocket closed:", code, reason)
+
+
+def on_reconnect(ws, attempt):
+    print("Reconnecting. Attempt:", attempt)
+
+
+def on_noreconnect(ws):
+    print("Maximum reconnection attempts reached.")
+
+
+def stop_program(signum=None, frame=None):
+    print()
+    print("Stopping live price feed...")
     try:
-        ticker.connect(threaded=False)
-    except KeyboardInterrupt:
-        stop_program()
-    except Exception as error:
-        print("Unable to start live feed.")
-        print("Error:", error)
-        return 1
-    return 0
+        ticker.close()
+    except Exception:
+        pass
+    sys.exit(0)
 
 
-if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except RuntimeError as exc:
-        print(f"Unable to start live feed.\nError: {exc}", file=sys.stderr)
-        sys.exit(1)
+ticker.on_connect = on_connect
+ticker.on_ticks = on_ticks
+ticker.on_error = on_error
+ticker.on_close = on_close
+ticker.on_reconnect = on_reconnect
+ticker.on_noreconnect = on_noreconnect
+
+signal.signal(signal.SIGINT, stop_program)
+
+# =========================================================
+# START
+# =========================================================
+try:
+    ticker.connect(threaded=False)
+except KeyboardInterrupt:
+    stop_program()
+except Exception as error:
+    print("Unable to start live feed.")
+    print("Error:", error)
+    sys.exit(1)
