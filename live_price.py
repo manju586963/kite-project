@@ -171,7 +171,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        raise SystemExit(main())
+        sys.exit(main())
     except RuntimeError as exc:
         print(f"Unable to start live feed.\nError: {exc}", file=sys.stderr)
-        raise SystemExit(1)
+        sys.exit(1)
