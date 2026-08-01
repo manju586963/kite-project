@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
 """
-Step 5 — Historical Supertrend paper trading (15-minute candles).
+Intraday Supertrend paper trading — historical test (Master Version).
 
-Instrument : config.TRADING_SYMBOL (default CRUDEOIL26AUGFUT)
+Instrument : config.TRADING_SYMBOL (MCX CRUDEOIL August 2026 futures)
 Timeframe  : 15-minute OHLC
-Indicator  : Supertrend (10, 3)
-Mode       : Paper trading only — no Kite order APIs
+Indicator  : Supertrend (10, 1)
+Mode       : Intraday paper trading only — no Kite order APIs
+
+Rules:
+  - BUY  when Supertrend flips bearish → bullish (at candle close)
+  - SELL when Supertrend flips bullish → bearish (at candle close)
+  - BUY  closes SHORT then opens LONG
+  - SELL closes LONG then opens SHORT
+  - No new entries after 11:00 PM
+  - Compulsory square-off at 11:15 PM (INTRADAY_SQUARE_OFF)
+  - Each trading day starts FLAT (no overnight positions)
 
 Outputs (project root):
   supertrend_signals.csv
@@ -21,7 +30,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Iterable, Literal, Sequence
 
@@ -37,8 +46,14 @@ SESSION_FILE = ROOT / ".kite_session.json"
 
 INTERVAL = "15minute"
 ST_PERIOD = 10
-ST_MULTIPLIER = 3.0
-DEFAULT_LOOKBACK_DAYS = 60
+ST_MULTIPLIER = 1.0
+DEFAULT_TRADING_DAYS = 30
+# Extra calendar days so Supertrend has warm-up history before the test window.
+DEFAULT_LOOKBACK_DAYS = 50
+
+# Intraday session controls (IST clock on the candle timestamp).
+NO_NEW_ENTRY_AFTER = time(23, 0)  # 11:00 PM — no new entries after this
+SQUARE_OFF_AT = time(23, 15)  # 11:15 PM — compulsory flat
 
 SIGNALS_FILE = ROOT / "supertrend_signals.csv"
 TRADES_FILE = ROOT / "paper_trades.csv"
@@ -87,7 +102,29 @@ def make_kite() -> KiteConnect:
 
 
 # ---------------------------------------------------------------------------
-# Supertrend (10, 3) — Wilder ATR
+# Time helpers
+# ---------------------------------------------------------------------------
+def candle_clock(ts: datetime) -> time:
+    """Return the candle's clock time (hour/minute as provided by Kite, IST)."""
+    return time(ts.hour, ts.minute, ts.second)
+
+
+def trading_day(ts: datetime) -> date:
+    return ts.date()
+
+
+def allows_new_entry(ts: datetime) -> bool:
+    """Entries permitted at or before 11:00 PM candle close."""
+    return candle_clock(ts) <= NO_NEW_ENTRY_AFTER
+
+
+def is_square_off_candle(ts: datetime) -> bool:
+    """Compulsory square-off at/after the 11:15 PM candle."""
+    return candle_clock(ts) >= SQUARE_OFF_AT
+
+
+# ---------------------------------------------------------------------------
+# Supertrend (10, 1) — Wilder ATR
 # ---------------------------------------------------------------------------
 @dataclass
 class Candle:
@@ -120,11 +157,7 @@ def compute_supertrend(
     """
     Classic Supertrend using Wilder's ATR.
 
-    direction:
-      bullish → price above Supertrend (support)
-      bearish → price below Supertrend (resistance)
-
-    signal on completed candle close:
+    Signals on completed candle close:
       BUY  when direction flips bearish → bullish
       SELL when direction flips bullish → bearish
     """
@@ -139,12 +172,12 @@ def compute_supertrend(
     closes = [c.close for c in candles]
 
     tr = [0.0] * n
-    atr = [None] * n  # type: list[float | None]
+    atr: list[float | None] = [None] * n
     basic_ub = [0.0] * n
     basic_lb = [0.0] * n
     final_ub = [0.0] * n
     final_lb = [0.0] * n
-    st = [None] * n  # type: list[float | None]
+    st: list[float | None] = [None] * n
     direction: list[Direction | None] = [None] * n
 
     tr[0] = highs[0] - lows[0]
@@ -192,9 +225,8 @@ def compute_supertrend(
                 direction[i] = "bullish"
             continue
 
-        prev_st = st[i - 1]
         prev_dir = direction[i - 1]
-        if prev_st is None or prev_dir is None:
+        if prev_dir is None:
             continue
 
         if prev_dir == "bullish":
@@ -204,7 +236,7 @@ def compute_supertrend(
             else:
                 st[i] = final_lb[i]
                 direction[i] = "bullish"
-        else:  # bearish
+        else:
             if closes[i] > final_ub[i]:
                 st[i] = final_lb[i]
                 direction[i] = "bullish"
@@ -215,7 +247,12 @@ def compute_supertrend(
     rows: list[CandleST] = []
     for i, c in enumerate(candles):
         signal: Side | None = None
-        if i > 0 and direction[i] and direction[i - 1] and direction[i] != direction[i - 1]:
+        if (
+            i > 0
+            and direction[i]
+            and direction[i - 1]
+            and direction[i] != direction[i - 1]
+        ):
             signal = "BUY" if direction[i] == "bullish" else "SELL"
         rows.append(
             CandleST(
@@ -236,14 +273,15 @@ def compute_supertrend(
 
 
 # ---------------------------------------------------------------------------
-# Paper trading engine
+# Intraday paper trading engine
 # ---------------------------------------------------------------------------
 @dataclass
 class PaperTrade:
     trade_id: int
-    side: Side  # direction of the open position: BUY=LONG, SELL=SHORT
+    side: Side  # BUY=LONG, SELL=SHORT
     entry_time: datetime
     entry_price: float
+    trade_date: date | None = None
     exit_time: datetime | None = None
     exit_price: float | None = None
     points: float | None = None
@@ -257,14 +295,18 @@ def simulate_paper_trades(
     lot_size: int,
 ) -> list[PaperTrade]:
     """
-    No position → BUY opens LONG
-    LONG → SELL closes LONG and opens SHORT
-    SHORT → BUY closes SHORT and opens LONG
-    Open position at end is closed at the last candle close (marked EOD_CLOSE).
+    Intraday-only paper engine.
+
+    Each trading day starts FLAT (previous Supertrend position is not carried).
+    Signals during the entry window flip/reverse the position.
+    After 11:00 PM: no new entries (signals ignored).
+    At 11:15 PM (or last candle of the day): compulsory INTRADAY_SQUARE_OFF.
     """
     trades: list[PaperTrade] = []
     open_trade: PaperTrade | None = None
     next_id = 1
+    current_day: date | None = None
+    last_row: CandleST | None = None
 
     def close_open(exit_time: datetime, exit_price: float, reason: str) -> None:
         nonlocal open_trade
@@ -283,40 +325,74 @@ def simulate_paper_trades(
         open_trade = None
 
     for row in rows:
-        if not row.signal:
+        day = trading_day(row.date)
+
+        # New calendar trading day → force flat using previous day's last candle.
+        if current_day is None:
+            current_day = day
+        elif day != current_day:
+            if open_trade is not None and last_row is not None:
+                close_open(
+                    last_row.date,
+                    float(last_row.close),
+                    "INTRADAY_SQUARE_OFF",
+                )
+            current_day = day
+            # Daily reset: position is FLAT; do not inherit prior day stance.
+
+        # Compulsory square-off candle (11:15 PM+).
+        if is_square_off_candle(row.date):
+            if open_trade is not None:
+                close_open(row.date, float(row.close), "INTRADAY_SQUARE_OFF")
+            last_row = row
             continue
-        price = float(row.close)
-        ts = row.date
 
-        if open_trade is None:
-            open_trade = PaperTrade(
-                trade_id=next_id,
-                side=row.signal,
-                entry_time=ts,
-                entry_price=price,
-            )
-            next_id += 1
-            continue
+        # Act on Supertrend flips only inside the entry window.
+        if row.signal and allows_new_entry(row.date):
+            price = float(row.close)
+            ts = row.date
 
-        if row.signal == open_trade.side:
-            # Same-side signal while already in that direction — ignore.
-            continue
+            if open_trade is None:
+                open_trade = PaperTrade(
+                    trade_id=next_id,
+                    side=row.signal,
+                    entry_time=ts,
+                    entry_price=price,
+                    trade_date=day,
+                )
+                next_id += 1
+            elif row.signal != open_trade.side:
+                # Close existing, then open the opposite side.
+                close_open(ts, price, f"FLIP_{row.signal}")
+                open_trade = PaperTrade(
+                    trade_id=next_id,
+                    side=row.signal,
+                    entry_time=ts,
+                    entry_price=price,
+                    trade_date=day,
+                )
+                next_id += 1
+            # Same-side signal while already in that direction → ignore.
 
-        # Flip: close current, open opposite.
-        close_open(ts, price, f"FLIP_{row.signal}")
-        open_trade = PaperTrade(
-            trade_id=next_id,
-            side=row.signal,
-            entry_time=ts,
-            entry_price=price,
-        )
-        next_id += 1
+        last_row = row
 
-    if open_trade is not None and rows:
-        last = rows[-1]
-        close_open(last.date, float(last.close), "EOD_CLOSE")
+    # End of series: never carry overnight.
+    if open_trade is not None and last_row is not None:
+        close_open(last_row.date, float(last_row.close), "INTRADAY_SQUARE_OFF")
 
     return trades
+
+
+def filter_last_trading_days(
+    rows: Sequence[CandleST],
+    trading_days: int = DEFAULT_TRADING_DAYS,
+) -> list[CandleST]:
+    """Keep candles belonging to the last N unique trading dates."""
+    if trading_days <= 0 or not rows:
+        return list(rows)
+    days = sorted({trading_day(r.date) for r in rows})
+    keep = set(days[-trading_days:])
+    return [r for r in rows if trading_day(r.date) in keep]
 
 
 def summarize_trades(trades: Sequence[PaperTrade]) -> dict:
@@ -324,16 +400,26 @@ def summarize_trades(trades: Sequence[PaperTrade]) -> dict:
     wins = [t for t in closed if (t.pnl or 0) > 0]
     losses = [t for t in closed if (t.pnl or 0) < 0]
     flats = [t for t in closed if (t.pnl or 0) == 0]
+    square_offs = [t for t in closed if t.exit_reason == "INTRADAY_SQUARE_OFF"]
     net = sum(t.pnl or 0 for t in closed)
+
+    by_day: dict[date, float] = {}
+    for t in closed:
+        d = t.trade_date or trading_day(t.entry_time)
+        by_day[d] = by_day.get(d, 0.0) + (t.pnl or 0.0)
+
     return {
         "total_trades": len(closed),
         "wins": len(wins),
         "losses": len(losses),
         "flats": len(flats),
+        "square_offs": len(square_offs),
+        "trading_days": len(by_day),
         "win_rate_pct": (len(wins) / len(closed) * 100.0) if closed else 0.0,
         "net_pnl": net,
         "gross_profit": sum(t.pnl or 0 for t in wins),
         "gross_loss": sum(t.pnl or 0 for t in losses),
+        "daily_pnl": dict(sorted(by_day.items())),
     }
 
 
@@ -345,7 +431,11 @@ def candles_from_kite_records(records: Iterable[dict]) -> list[Candle]:
     for r in records:
         out.append(
             Candle(
-                date=r["date"] if isinstance(r["date"], datetime) else datetime.fromisoformat(str(r["date"])),
+                date=(
+                    r["date"]
+                    if isinstance(r["date"], datetime)
+                    else datetime.fromisoformat(str(r["date"]))
+                ),
                 open=float(r["open"]),
                 high=float(r["high"]),
                 low=float(r["low"]),
@@ -364,10 +454,7 @@ def fetch_historical_15m(
     from_dt: datetime,
     to_dt: datetime,
 ) -> list[Candle]:
-    """
-    Download 15-minute candles. Kite limits range per request for intraday
-    intervals, so fetch in ~60-day chunks and merge.
-    """
+    """Download 15-minute candles in ~60-day chunks and merge."""
     chunk_days = 60
     cursor = from_dt
     all_records: list[dict] = []
@@ -388,11 +475,9 @@ def fetch_historical_15m(
         all_records.extend(records)
         cursor = chunk_end + timedelta(seconds=1)
 
-    # De-duplicate by timestamp
     by_ts: dict[datetime, dict] = {}
     for r in all_records:
-        ts = r["date"]
-        by_ts[ts] = r
+        by_ts[r["date"]] = r
     ordered = [by_ts[k] for k in sorted(by_ts)]
     return candles_from_kite_records(ordered)
 
@@ -416,6 +501,7 @@ def write_signals_csv(path: Path, rows: Sequence[CandleST], symbol: str) -> None
                 "supertrend",
                 "direction",
                 "signal",
+                "entry_allowed",
             ]
         )
         for r in rows:
@@ -432,16 +518,24 @@ def write_signals_csv(path: Path, rows: Sequence[CandleST], symbol: str) -> None
                     "" if r.supertrend is None else round(r.supertrend, 4),
                     r.direction or "",
                     r.signal or "",
+                    (
+                        "YES"
+                        if allows_new_entry(r.date) and not is_square_off_candle(r.date)
+                        else "NO"
+                    ),
                 ]
             )
 
 
-def write_trades_csv(path: Path, trades: Sequence[PaperTrade], symbol: str, lot_size: int) -> None:
+def write_trades_csv(
+    path: Path, trades: Sequence[PaperTrade], symbol: str, lot_size: int
+) -> None:
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         writer.writerow(
             [
                 "trade_id",
+                "trade_date",
                 "symbol",
                 "side",
                 "position",
@@ -459,6 +553,7 @@ def write_trades_csv(path: Path, trades: Sequence[PaperTrade], symbol: str, lot_
             writer.writerow(
                 [
                     t.trade_id,
+                    (t.trade_date or trading_day(t.entry_time)).isoformat(),
                     symbol,
                     t.side,
                     "LONG" if t.side == "BUY" else "SHORT",
@@ -488,23 +583,28 @@ def write_summary(
     stats: dict,
 ) -> None:
     lines = [
-        "Historical Supertrend Paper Trading Summary",
-        "==========================================",
+        "Intraday Supertrend Paper Trading Summary",
+        "=========================================",
         "",
         f"Symbol              : {symbol}",
         f"Instrument token    : {token}",
         f"Interval            : {INTERVAL}",
         f"Supertrend          : ({ST_PERIOD}, {ST_MULTIPLIER:g})",
+        f"Style               : Intraday (daily square-off)",
+        f"No new entries after: {NO_NEW_ENTRY_AFTER.strftime('%I:%M %p')}",
+        f"Compulsory exit     : {SQUARE_OFF_AT.strftime('%I:%M %p')} (INTRADAY_SQUARE_OFF)",
         f"Lot size            : {lot_size}",
         f"From                : {from_dt.isoformat()}",
         f"To                  : {to_dt.isoformat()}",
         f"Candles             : {candle_count}",
         f"Signals (BUY/SELL)  : {signal_count}",
+        f"Trading days        : {stats['trading_days']}",
         "",
         f"Total trades        : {stats['total_trades']}",
         f"Wins                : {stats['wins']}",
         f"Losses              : {stats['losses']}",
         f"Flats               : {stats['flats']}",
+        f"Square-offs         : {stats['square_offs']}",
         f"Win rate            : {stats['win_rate_pct']:.2f}%",
         f"Gross profit        : {stats['gross_profit']:.2f}",
         f"Gross loss          : {stats['gross_loss']:.2f}",
@@ -512,11 +612,17 @@ def write_summary(
         "",
         "Notes:",
         "- Paper trading only. No real orders were placed.",
-        "- Entry/exit prices use the close of the completed 15-minute signal candle.",
-        "- Any open position at the end of the series is closed at the last candle (EOD_CLOSE).",
+        "- Entry/exit prices use the close of the completed 15-minute candle.",
+        "- Each day starts FLAT; overnight Supertrend stance is not carried as a position.",
+        "- Forced exits are recorded as INTRADAY_SQUARE_OFF.",
         "- P&L = points × lot_size (from the instrument master).",
         "",
     ]
+    if stats.get("daily_pnl"):
+        lines.append("Daily realised paper P&L:")
+        for d, pnl in stats["daily_pnl"].items():
+            lines.append(f"  {d.isoformat()} : {pnl:.2f}")
+        lines.append("")
     if trades:
         lines.append("Trade log (brief):")
         for t in trades:
@@ -534,13 +640,21 @@ def write_summary(
 # ---------------------------------------------------------------------------
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Historical Supertrend (10,3) paper trading on 15-minute candles"
+        description=(
+            "Intraday Supertrend (10,1) historical paper trading on 15-minute candles"
+        )
     )
     parser.add_argument(
         "--days",
         type=int,
         default=DEFAULT_LOOKBACK_DAYS,
-        help=f"Lookback days ending now (default {DEFAULT_LOOKBACK_DAYS})",
+        help=f"Calendar lookback days to download (default {DEFAULT_LOOKBACK_DAYS})",
+    )
+    parser.add_argument(
+        "--trading-days",
+        type=int,
+        default=DEFAULT_TRADING_DAYS,
+        help=f"Use the last N trading days for the test (default {DEFAULT_TRADING_DAYS})",
     )
     parser.add_argument("--from", dest="from_date", help="Start date YYYY-MM-DD")
     parser.add_argument("--to", dest="to_date", help="End date YYYY-MM-DD")
@@ -579,19 +693,21 @@ def main(argv: list[str] | None = None) -> int:
 
     symbol = config.TRADING_SYMBOL
     print("========================================")
-    print("HISTORICAL SUPERTREND PAPER TRADING")
+    print("INTRADAY SUPERTREND PAPER TRADING")
     print("========================================")
-    print(f"Symbol     : {symbol}")
-    print(f"Interval   : {INTERVAL}")
-    print(f"Supertrend : ({ST_PERIOD}, {ST_MULTIPLIER:g})")
-    print("Orders     : DISABLED (paper only)")
+    print(f"Symbol       : {symbol}")
+    print(f"Interval     : {INTERVAL}")
+    print(f"Supertrend   : ({ST_PERIOD}, {ST_MULTIPLIER:g})")
+    print(f"No entries   : after {NO_NEW_ENTRY_AFTER.strftime('%I:%M %p')}")
+    print(f"Square-off   : {SQUARE_OFF_AT.strftime('%I:%M %p')}")
+    print("Overnight    : NOT PERMITTED")
+    print("Orders       : DISABLED (paper only)")
     print("========================================")
     print()
 
     if args.csv_candles:
         print(f"Loading candles from {args.csv_candles}...")
         candles = load_candles_csv(Path(args.csv_candles))
-        # Resolve contract metadata when possible; fall back for offline runs.
         try:
             contract = resolve_contract()
             token = contract.instrument_token
@@ -631,9 +747,19 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     print(f"Candles loaded: {len(candles)}")
-    print("Computing Supertrend and simulating paper trades...")
-    rows = compute_supertrend(candles, ST_PERIOD, ST_MULTIPLIER)
-    signals = [r for r in rows if r.signal]
+    print("Computing Supertrend (10,1)...")
+    all_rows = compute_supertrend(candles, ST_PERIOD, ST_MULTIPLIER)
+
+    # Supertrend uses full history for warm-up; simulate only the test window.
+    rows = filter_last_trading_days(all_rows, args.trading_days)
+    test_days = sorted({trading_day(r.date) for r in rows})
+    print(
+        f"Test window   : {test_days[0]} → {test_days[-1]} "
+        f"({len(test_days)} trading days, {len(rows)} candles)"
+    )
+
+    print("Simulating intraday paper trades...")
+    signals = [r for r in rows if r.signal and allows_new_entry(r.date)]
     trades = simulate_paper_trades(rows, lot_size=lot_size)
     stats = summarize_trades(trades)
 
@@ -644,19 +770,20 @@ def main(argv: list[str] | None = None) -> int:
         symbol=symbol,
         token=token,
         lot_size=lot_size,
-        from_dt=from_dt,
-        to_dt=to_dt,
-        candle_count=len(candles),
+        from_dt=rows[0].date if rows else from_dt,
+        to_dt=rows[-1].date if rows else to_dt,
+        candle_count=len(rows),
         signal_count=len(signals),
         trades=trades,
         stats=stats,
     )
 
     print()
-    print("Done (paper trading only — no real orders).")
-    print(f"  Signals file : {SIGNALS_FILE.name} ({len(signals)} BUY/SELL marks)")
+    print("Done (intraday paper trading only — no real orders).")
+    print(f"  Signals file : {SIGNALS_FILE.name}")
     print(f"  Trades file  : {TRADES_FILE.name} ({stats['total_trades']} trades)")
     print(f"  Summary file : {SUMMARY_FILE.name}")
+    print(f"  Square-offs  : {stats['square_offs']}")
     print(f"  Win rate     : {stats['win_rate_pct']:.2f}%")
     print(f"  Net paper P&L: {stats['net_pnl']:.2f}")
     return 0

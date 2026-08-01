@@ -110,22 +110,29 @@ Subscribed to: CRUDEOIL26AUGFUT
 ... | CRUDEOIL26AUGFUT | LTP: ... | Volume: ... | OI: ...
 ```
 
-## Historical Supertrend paper trading (Step 5)
+## Historical Supertrend paper trading (Step 5 — Intraday Master)
 
-Validates Supertrend **(10, 3)** on historical **15-minute** candles for `config.TRADING_SYMBOL`. Paper trading only — **no real orders**.
+Validates Supertrend **(10, 1)** on historical **15-minute** candles for `config.TRADING_SYMBOL` using an **intraday-only** model:
+
+- BUY / SELL on Supertrend flips at candle close
+- No new entries after **11:00 PM**
+- Compulsory square-off at **11:15 PM** (`INTRADAY_SQUARE_OFF`)
+- Each day starts **FLAT** (no overnight positions)
+- Default test window: last **30 trading days**
+- Paper trading only — **no real orders**
 
 ```bash
 python scripts/zerodha_login.py
 python historical_supertrend_paper.py
-python historical_supertrend_paper.py --days 45
+python historical_supertrend_paper.py --trading-days 30
 python historical_supertrend_paper.py --from 2026-06-01 --to 2026-08-01
 ```
 
 Outputs written to the project folder:
 
 - `supertrend_signals.csv` — candles + Supertrend + BUY/SELL marks
-- `paper_trades.csv` — entry/exit, points, lot P&L
-- `paper_trading_summary.txt` — totals, win rate, net paper P&L
+- `paper_trades.csv` — entry/exit, points, lot P&L, square-offs
+- `paper_trading_summary.txt` — totals, win rate, daily & net paper P&L
 
 Offline test with a local candle CSV:
 
