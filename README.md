@@ -52,22 +52,28 @@ Broker: ZERODHA
 Available margin data received: True
 ```
 
-## Crude Oil contract selector
+## Crude Oil contract (fixed)
 
-Automatically picks the active **MCX Crude Oil futures** contract from the live Kite instrument master using a **5-calendar-day** pre-expiry rollover rule (never trades an expired contract; never hard-codes month symbols).
+The active contract is set manually in `config.py`:
+
+```python
+TRADING_SYMBOL = "CRUDEOIL26AUGFUT"
+```
+
+`crude_oil_selector.py` reads that symbol, downloads the Kite instrument list, finds the matching MCX contract, and returns its `instrument_token`. No rollover logic — when the month changes, update only `TRADING_SYMBOL`.
 
 ```bash
 python crude_oil_selector.py
-python crude_oil_selector.py --list
-python crude_oil_selector.py --as-of 2026-08-15 --json
+python crude_oil_selector.py --json
+python crude_oil_selector.py --symbol CRUDEOIL26SEPFUT
 ```
 
 Import in other modules:
 
 ```python
-from crude_oil_selector import get_active_crude_oil_contract
+from crude_oil_selector import resolve_contract
 
-contract = get_active_crude_oil_contract()
+contract = resolve_contract()
 print(contract.tradingsymbol, contract.instrument_token, contract.expiry)
 ```
 

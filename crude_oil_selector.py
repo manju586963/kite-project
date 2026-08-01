@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Crude Oil contract selector for MCX futures.
+Fixed Crude Oil contract resolver.
 
-Downloads the Kite instrument master, finds MCX CRUDEOIL futures, and picks
-the active contract using a 5-calendar-day pre-expiry rollover rule.
+Reads TRADING_SYMBOL from config.py, downloads the Kite instrument master,
+finds that exact MCX contract, and returns its instrument_token (and metadata).
 
-Never returns an expired contract. Never hard-codes contract month names.
+No rollover logic. No expiry calculations. No automatic contract selection.
+Update config.TRADING_SYMBOL manually when you want to switch months.
 """
 
 from __future__ import annotations
@@ -16,23 +17,23 @@ import json
 import sys
 import urllib.request
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from io import StringIO
 from pathlib import Path
-from typing import Iterable, Sequence
+
+import config
 
 INSTRUMENTS_URL = "https://api.kite.trade/instruments"
 EXCHANGE = "MCX"
 SEGMENT = "MCX-FUT"
 UNDERLYING = "CRUDEOIL"
-DEFAULT_ROLLOVER_DAYS = 5
 
 
 @dataclass(frozen=True)
 class CrudeOilContract:
     tradingsymbol: str
     instrument_token: int
-    expiry: date
+    expiry: date | None
     exchange: str = EXCHANGE
     segment: str = SEGMENT
     name: str = UNDERLYING
@@ -42,12 +43,12 @@ class CrudeOilContract:
 
     def to_dict(self) -> dict:
         payload = asdict(self)
-        payload["expiry"] = self.expiry.isoformat()
+        payload["expiry"] = self.expiry.isoformat() if self.expiry else None
         return payload
 
 
-class ContractSelectionError(RuntimeError):
-    """Raised when no valid Crude Oil futures contract can be selected."""
+class ContractLookupError(RuntimeError):
+    """Raised when the configured trading symbol cannot be resolved."""
 
 
 def download_instruments(url: str = INSTRUMENTS_URL, timeout: float = 60.0) -> str:
@@ -64,48 +65,36 @@ def load_instruments_csv(text: str) -> list[dict[str, str]]:
     return list(csv.DictReader(StringIO(text)))
 
 
-def _parse_expiry(value: str) -> date:
+def _parse_expiry(value: str) -> date | None:
     value = (value or "").strip()
     if not value:
-        raise ValueError("missing expiry")
-    # Kite instruments use YYYY-MM-DD.
+        return None
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
-def find_crude_oil_futures(
-    rows: Iterable[dict[str, str]],
+def find_contract_by_symbol(
+    rows: list[dict[str, str]],
+    trading_symbol: str,
     *,
-    as_of: date | None = None,
-) -> list[CrudeOilContract]:
-    """
-    Return non-expired MCX Crude Oil futures, sorted by expiry ascending.
-    """
-    today = as_of or date.today()
-    contracts: list[CrudeOilContract] = []
+    exchange: str = EXCHANGE,
+) -> CrudeOilContract:
+    """Find one instrument row by exact tradingsymbol (and exchange)."""
+    symbol = (trading_symbol or "").strip()
+    if not symbol:
+        raise ContractLookupError("TRADING_SYMBOL is empty. Set it in config.py.")
 
     for row in rows:
-        if row.get("exchange") != EXCHANGE:
+        if row.get("tradingsymbol", "").strip() != symbol:
             continue
-        if row.get("segment") != SEGMENT:
-            continue
-        if row.get("name") != UNDERLYING:
-            continue
-        if (row.get("instrument_type") or "").upper() != "FUT":
-            continue
-
-        try:
-            expiry = _parse_expiry(row.get("expiry", ""))
-        except ValueError:
-            continue
-
-        # Never trade an expired contract.
-        if expiry < today:
+        if exchange and row.get("exchange") != exchange:
             continue
 
         try:
             token = int(row["instrument_token"])
-        except (KeyError, TypeError, ValueError):
-            continue
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ContractLookupError(
+                f"Invalid instrument_token for {symbol!r}."
+            ) from exc
 
         exchange_token = None
         raw_exchange_token = (row.get("exchange_token") or "").strip()
@@ -127,104 +116,61 @@ def find_crude_oil_futures(
         except ValueError:
             pass
 
-        contracts.append(
-            CrudeOilContract(
-                tradingsymbol=row["tradingsymbol"].strip(),
-                instrument_token=token,
-                expiry=expiry,
-                lot_size=lot_size,
-                tick_size=tick_size,
-                exchange_token=exchange_token,
-            )
+        return CrudeOilContract(
+            tradingsymbol=symbol,
+            instrument_token=token,
+            expiry=_parse_expiry(row.get("expiry", "")),
+            exchange=row.get("exchange") or exchange,
+            segment=row.get("segment") or SEGMENT,
+            name=row.get("name") or UNDERLYING,
+            lot_size=lot_size,
+            tick_size=tick_size,
+            exchange_token=exchange_token,
         )
 
-    contracts.sort(key=lambda c: (c.expiry, c.tradingsymbol))
-    return contracts
+    raise ContractLookupError(
+        f"Trading symbol {symbol!r} not found in the instrument list "
+        f"for exchange {exchange}. Update config.TRADING_SYMBOL."
+    )
 
 
-def select_crude_oil_contract(
-    contracts: Sequence[CrudeOilContract],
+def resolve_contract(
     *,
-    as_of: date | None = None,
-    rollover_days: int = DEFAULT_ROLLOVER_DAYS,
-) -> CrudeOilContract:
-    """
-    Apply the rollover rule:
-
-    - Sort by expiry (caller normally already does this).
-    - Use the nearest expiry if it is more than `rollover_days` away.
-    - Otherwise use the next expiry contract.
-    """
-    today = as_of or date.today()
-    if rollover_days < 0:
-        raise ValueError("rollover_days must be >= 0")
-
-    active = [c for c in contracts if c.expiry >= today]
-    if not active:
-        raise ContractSelectionError(
-            f"No non-expired {UNDERLYING} futures found on {EXCHANGE} as of {today}."
-        )
-
-    nearest = active[0]
-    days_to_expiry = (nearest.expiry - today).days
-
-    # More than N calendar days away → trade front month.
-    if days_to_expiry > rollover_days:
-        return nearest
-
-    # Within the last N days before expiry → roll to next month.
-    if len(active) < 2:
-        raise ContractSelectionError(
-            f"Nearest contract {nearest.tradingsymbol} expires in {days_to_expiry} day(s) "
-            f"(rollover window={rollover_days}), but no next-month contract is available."
-        )
-    return active[1]
-
-
-def get_active_crude_oil_contract(
-    *,
-    as_of: date | None = None,
-    rollover_days: int = DEFAULT_ROLLOVER_DAYS,
+    trading_symbol: str | None = None,
     instruments_csv: str | Path | None = None,
     instruments_url: str = INSTRUMENTS_URL,
 ) -> CrudeOilContract:
     """
-    Download (or load) the instrument master and return the selected contract.
+    Resolve the fixed contract from config (or an explicit symbol override).
+
+    Steps:
+      1. Read TRADING_SYMBOL from config.py (unless overridden).
+      2. Download / load the Kite instrument master.
+      3. Find the matching contract by trading symbol.
+      4. Return tradingsymbol + instrument_token (+ metadata).
     """
+    symbol = trading_symbol if trading_symbol is not None else config.TRADING_SYMBOL
+
     if instruments_csv is not None:
         text = Path(instruments_csv).read_text(encoding="utf-8-sig")
     else:
         text = download_instruments(instruments_url)
 
     rows = load_instruments_csv(text)
-    contracts = find_crude_oil_futures(rows, as_of=as_of)
-    return select_crude_oil_contract(
-        contracts,
-        as_of=as_of,
-        rollover_days=rollover_days,
-    )
+    return find_contract_by_symbol(rows, symbol)
 
 
-def _parse_as_of(value: str | None) -> date | None:
-    if not value:
-        return None
-    return datetime.strptime(value, "%Y-%m-%d").date()
+# Backwards-compatible alias used by earlier imports / docs.
+get_active_crude_oil_contract = resolve_contract
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Select the active MCX Crude Oil futures contract"
+        description="Resolve the fixed MCX Crude Oil contract from config.py"
     )
     parser.add_argument(
-        "--as-of",
-        help="Selection date YYYY-MM-DD (default: today)",
-    )
-    parser.add_argument(
-        "--rollover-days",
-        type=int,
-        default=DEFAULT_ROLLOVER_DAYS,
-        help=f"Roll to next month when within this many calendar days of expiry "
-        f"(default {DEFAULT_ROLLOVER_DAYS})",
+        "--symbol",
+        help="Override config.TRADING_SYMBOL for this run only",
     )
     parser.add_argument(
         "--csv",
@@ -233,59 +179,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Print the selected contract as JSON",
-    )
-    parser.add_argument(
-        "--list",
-        action="store_true",
-        help="List all non-expired CRUDEOIL futures before selecting",
+        help="Print the resolved contract as JSON",
     )
     args = parser.parse_args(argv)
 
-    as_of = _parse_as_of(args.as_of)
-
     try:
-        if args.csv:
-            text = Path(args.csv).read_text(encoding="utf-8-sig")
-        else:
-            print("Downloading instrument master...", file=sys.stderr)
-            text = download_instruments()
-
-        rows = load_instruments_csv(text)
-        contracts = find_crude_oil_futures(rows, as_of=as_of)
-
-        if args.list:
-            for contract in contracts:
-                days = (contract.expiry - (as_of or date.today())).days
-                print(
-                    f"{contract.tradingsymbol}\t"
-                    f"expiry={contract.expiry.isoformat()}\t"
-                    f"days={days}\t"
-                    f"token={contract.instrument_token}"
-                )
-
-        selected = select_crude_oil_contract(
-            contracts,
-            as_of=as_of,
-            rollover_days=args.rollover_days,
+        contract = resolve_contract(
+            trading_symbol=args.symbol,
+            instruments_csv=args.csv,
         )
     except Exception as exc:  # noqa: BLE001
         print(f"Crude oil selector failed: {exc}", file=sys.stderr)
         return 1
 
     if args.json:
-        print(json.dumps(selected.to_dict(), indent=2))
+        print(json.dumps(contract.to_dict(), indent=2))
     else:
-        today = as_of or date.today()
-        days = (selected.expiry - today).days
-        print("Selected Crude Oil contract")
-        print(f"  tradingsymbol   : {selected.tradingsymbol}")
-        print(f"  instrument_token: {selected.instrument_token}")
-        print(f"  expiry          : {selected.expiry.isoformat()}")
-        print(f"  days_to_expiry  : {days}")
-        print(f"  lot_size        : {selected.lot_size}")
-        print(f"  as_of           : {today.isoformat()}")
-        print(f"  rollover_days   : {args.rollover_days}")
+        print("Resolved Crude Oil contract")
+        print(f"  tradingsymbol   : {contract.tradingsymbol}")
+        print(f"  instrument_token: {contract.instrument_token}")
+        print(
+            f"  expiry          : "
+            f"{contract.expiry.isoformat() if contract.expiry else 'n/a'}"
+        )
+        print(f"  lot_size        : {contract.lot_size}")
+        print(f"  source          : config.TRADING_SYMBOL / override")
     return 0
 
 
