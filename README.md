@@ -136,9 +136,10 @@ Outputs are saved under a dated folder in the project main folder (never overwri
 
 Inside each folder, filenames are also kept unique (`supertrend_signals_2.csv`, …) so nothing is overwritten.
 
-- `supertrend_signals.csv` — candles + Supertrend + BUY/SELL marks
+- `supertrend_signals.csv` — HA candles + Supertrend + BUY/SELL marks
 - `paper_trades.csv` — entry/exit, points, lot P&L, square-offs
 - `paper_trading_summary.txt` — totals, win rate, daily & net paper P&L
+- `monthly/jun-2025.xlsx`, `monthly/jul-2025.xlsx`, … — one Excel workbook per month with sheets `signals`, `trades`, `summary`
 
 Offline test with a local candle CSV:
 

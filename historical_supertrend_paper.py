@@ -24,6 +24,10 @@ Outputs (never overwrite; dated folder in project root):
     supertrend_signals.csv
     paper_trades.csv
     paper_trading_summary.txt
+    monthly/
+      jun-2025.xlsx
+      jul-2025.xlsx
+      ...
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ from typing import Iterable, Literal, Sequence
 
 from dotenv import load_dotenv
 from kiteconnect import KiteConnect
+from openpyxl import Workbook
 
 import config
 from crude_oil_selector import resolve_contract
@@ -693,6 +698,180 @@ def write_trades_csv(
             )
 
 
+def _month_key(ts: datetime | date) -> str:
+    """Return folder/file month stamp like 2025-06."""
+    if isinstance(ts, datetime):
+        return f"{ts.year:04d}-{ts.month:02d}"
+    return f"{ts.year:04d}-{ts.month:02d}"
+
+
+def _month_label(year: int, month: int) -> str:
+    """Human month name for Excel, e.g. jun-2025."""
+    return datetime(year, month, 1).strftime("%b-%Y").lower()
+
+
+def write_monthly_excel(
+    output_dir: Path,
+    rows: Sequence[CandleST],
+    trades: Sequence[PaperTrade],
+    *,
+    symbol: str,
+    lot_size: int,
+    max_loss_points: float,
+) -> list[Path]:
+    """
+    Write one Excel workbook per calendar month under output_dir/monthly/.
+
+    Each file contains sheets: signals, trades, summary.
+    Existing files are never overwritten (unique_file_path).
+    """
+    monthly_dir = output_dir / "monthly"
+    monthly_dir.mkdir(parents=True, exist_ok=True)
+
+    rows_by_month: dict[str, list[CandleST]] = {}
+    for r in rows:
+        rows_by_month.setdefault(_month_key(r.date), []).append(r)
+
+    trades_by_month: dict[str, list[PaperTrade]] = {}
+    for t in trades:
+        d = t.trade_date or trading_day(t.entry_time)
+        trades_by_month.setdefault(_month_key(d), []).append(t)
+
+    months = sorted(set(rows_by_month) | set(trades_by_month))
+    written: list[Path] = []
+
+    for month in months:
+        year_s, month_s = month.split("-")
+        year, mon = int(year_s), int(month_s)
+        label = _month_label(year, mon)
+        path = unique_file_path(monthly_dir, f"{label}.xlsx")
+
+        month_rows = rows_by_month.get(month, [])
+        month_trades = trades_by_month.get(month, [])
+        month_stats = summarize_trades(month_trades)
+        month_signals = [
+            r for r in month_rows if r.signal and allows_new_entry(r.date)
+        ]
+
+        wb = Workbook()
+
+        # --- signals ---
+        ws_sig = wb.active
+        ws_sig.title = "signals"
+        sig_headers = [
+            "datetime",
+            "symbol",
+            "ha_open",
+            "ha_high",
+            "ha_low",
+            "ha_close",
+            "volume",
+            "atr",
+            "supertrend",
+            "direction",
+            "signal",
+            "entry_allowed",
+        ]
+        ws_sig.append(sig_headers)
+        for r in month_rows:
+            ws_sig.append(
+                [
+                    r.date.isoformat(),
+                    symbol,
+                    r.open,
+                    r.high,
+                    r.low,
+                    r.close,
+                    r.volume,
+                    None if r.atr is None else round(r.atr, 4),
+                    None if r.supertrend is None else round(r.supertrend, 4),
+                    r.direction or "",
+                    r.signal or "",
+                    (
+                        "YES"
+                        if allows_new_entry(r.date) and not is_square_off_candle(r.date)
+                        else "NO"
+                    ),
+                ]
+            )
+
+        # --- trades ---
+        ws_tr = wb.create_sheet("trades")
+        tr_headers = [
+            "trade_id",
+            "trade_date",
+            "symbol",
+            "side",
+            "position",
+            "entry_time",
+            "entry_price",
+            "stop_price",
+            "exit_time",
+            "exit_price",
+            "points",
+            "lot_size",
+            "pnl",
+            "exit_reason",
+        ]
+        ws_tr.append(tr_headers)
+        for t in month_trades:
+            ws_tr.append(
+                [
+                    t.trade_id,
+                    (t.trade_date or trading_day(t.entry_time)).isoformat(),
+                    symbol,
+                    t.side,
+                    "LONG" if t.side == "BUY" else "SHORT",
+                    t.entry_time.isoformat(),
+                    t.entry_price,
+                    t.stop_price,
+                    None if t.exit_time is None else t.exit_time.isoformat(),
+                    t.exit_price,
+                    None if t.points is None else round(t.points, 4),
+                    lot_size,
+                    None if t.pnl is None else round(t.pnl, 4),
+                    t.exit_reason or "",
+                ]
+            )
+
+        # --- summary ---
+        ws_sum = wb.create_sheet("summary")
+        summary_rows = [
+            ("Month", label),
+            ("Symbol", symbol),
+            ("Interval", f"{INTERVAL} (Heikin Ashi)"),
+            ("Supertrend", f"({ST_PERIOD}, {ST_MULTIPLIER:g})"),
+            ("Max loss points", max_loss_points),
+            ("Lot size", lot_size),
+            ("Candles", len(month_rows)),
+            ("Signals", len(month_signals)),
+            ("Total trades", month_stats["total_trades"]),
+            ("Wins", month_stats["wins"]),
+            ("Losses", month_stats["losses"]),
+            ("Max-loss stops", month_stats["max_loss_stops"]),
+            ("Square-offs", month_stats["square_offs"]),
+            ("Win rate %", round(month_stats["win_rate_pct"], 2)),
+            ("Gross profit", round(month_stats["gross_profit"], 2)),
+            ("Gross loss", round(month_stats["gross_loss"], 2)),
+            ("Net paper P&L", round(month_stats["net_pnl"], 2)),
+        ]
+        ws_sum.append(["Field", "Value"])
+        for field, value in summary_rows:
+            ws_sum.append([field, value])
+
+        if month_stats.get("daily_pnl"):
+            ws_sum.append([])
+            ws_sum.append(["Daily realised paper P&L", ""])
+            ws_sum.append(["Date", "PnL"])
+            for d, pnl in month_stats["daily_pnl"].items():
+                ws_sum.append([d.isoformat(), round(pnl, 2)])
+
+        wb.save(path)
+        written.append(path)
+
+    return written
+
+
 def write_summary(
     path: Path,
     *,
@@ -928,6 +1107,14 @@ def main(argv: list[str] | None = None) -> int:
         stats=stats,
         max_loss_points=args.max_loss_points,
     )
+    excel_files = write_monthly_excel(
+        output_dir,
+        rows,
+        trades,
+        symbol=symbol,
+        lot_size=lot_size,
+        max_loss_points=args.max_loss_points,
+    )
 
     print()
     print("Done (intraday paper trading only — no real orders).")
@@ -935,6 +1122,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Signals file : {signals_file.name}")
     print(f"  Trades file  : {trades_file.name} ({stats['total_trades']} trades)")
     print(f"  Summary file : {summary_file.name}")
+    print(f"  Monthly Excel: {len(excel_files)} file(s) in {output_dir / 'monthly'}")
+    for xf in excel_files:
+        print(f"    - {xf.relative_to(output_dir)}")
     print(f"  Max-loss stops: {stats['max_loss_stops']}")
     print(f"  Square-offs  : {stats['square_offs']}")
     print(f"  Win rate     : {stats['win_rate_pct']:.2f}%")

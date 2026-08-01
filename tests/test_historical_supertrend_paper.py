@@ -23,6 +23,7 @@ from historical_supertrend_paper import (  # noqa: E402
     summarize_trades,
     to_heikin_ashi,
     unique_file_path,
+    write_monthly_excel,
 )
 
 
@@ -299,6 +300,47 @@ class IntradayRuleTests(unittest.TestCase):
             leftover = OUTPUT_ROOT / "02-aug-2026"
             if leftover.exists() and not any(leftover.iterdir()):
                 leftover.rmdir()
+
+    def test_monthly_excel_export(self) -> None:
+        import shutil
+        from openpyxl import load_workbook
+        from historical_supertrend_paper import OUTPUT_ROOT
+
+        d1 = datetime(2026, 6, 1, 10, 0)
+        d2 = datetime(2026, 7, 1, 10, 0)
+        rows = [
+            _candle(d1, 100),
+            _candle(d1.replace(hour=23, minute=15), 110),
+            _candle(d2, 200),
+            _candle(d2.replace(hour=23, minute=15), 190),
+        ]
+        rows[0].signal = "BUY"
+        rows[1].signal = None
+        rows[2].signal = "SELL"
+        rows[3].signal = None
+        trades = simulate_paper_trades(rows, lot_size=1, max_loss_points=125)
+
+        folder = make_output_dir(datetime(2026, 8, 3, 12, 0, 0))
+        try:
+            files = write_monthly_excel(
+                folder,
+                rows,
+                trades,
+                symbol="CRUDEOIL26AUGFUT",
+                lot_size=1,
+                max_loss_points=125,
+            )
+            names = sorted(p.name for p in files)
+            self.assertEqual(names, ["jul-2026.xlsx", "jun-2026.xlsx"])
+            wb = load_workbook(files[0] if files[0].name.startswith("jun") else files[1])
+            # find jun file
+            jun = next(p for p in files if p.name.startswith("jun"))
+            wb = load_workbook(jun)
+            self.assertEqual(set(wb.sheetnames), {"signals", "trades", "summary"})
+            self.assertGreater(wb["signals"].max_row, 1)
+            self.assertGreater(wb["trades"].max_row, 1)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
 
 
 if __name__ == "__main__":
