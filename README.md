@@ -82,3 +82,27 @@ Unit tests (no network):
 ```bash
 python -m unittest tests.test_crude_oil_selector -v
 ```
+
+## Live price feed (Step 3)
+
+Streams LTP, volume, and open interest for the fixed contract in `config.py`. Uses `crude_oil_selector` to look up the live `instrument_token`. **No orders.**
+
+```bash
+python scripts/zerodha_login.py   # once per trading day
+python live_price.py              # Ctrl+C to stop
+```
+
+Expected:
+
+```text
+========================================
+MCX CRUDEOIL LIVE PRICE
+========================================
+Contract         : CRUDEOIL26AUGFUT
+...
+Orders           : DISABLED
+========================================
+Connected to Kite.
+Subscribed to: CRUDEOIL26AUGFUT
+... | CRUDEOIL26AUGFUT | LTP: ... | Volume: ... | OI: ...
+```
