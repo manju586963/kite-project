@@ -15,14 +15,13 @@ Usage:
 
 from __future__ import annotations
 
-import json
-import os
 import signal
 import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
-from kiteconnect import KiteConnect, KiteTicker
+from kiteconnect import KiteTicker
+
+from kite_credentials import load_access_token, load_api_key, make_kite
 
 # =========================================================
 # FIXED CONTRACT (August 2026)
@@ -40,43 +39,13 @@ CONTRACT_YEAR = 2026
 CONTRACT_MONTH = 8  # August
 
 ROOT = Path(__file__).resolve().parent
-ACCESS_TOKEN_FILE = ROOT / "access_token.txt"
-SESSION_FILE = ROOT / ".kite_session.json"
 
 # =========================================================
-# LOAD KITE CREDENTIALS
+# CONNECT TO KITE (env / .env / access_token.txt / session)
 # =========================================================
-load_dotenv(ROOT / ".env")
-
-api_key = os.getenv("KITE_API_KEY", "").strip()
-if not api_key and SESSION_FILE.exists():
-    api_key = (
-        json.loads(SESSION_FILE.read_text(encoding="utf-8")).get("api_key") or ""
-    ).strip()
-
-if not api_key:
-    raise RuntimeError("KITE_API_KEY is missing from the .env file.")
-
-access_token = ""
-if ACCESS_TOKEN_FILE.exists():
-    access_token = ACCESS_TOKEN_FILE.read_text(encoding="utf-8").strip()
-elif SESSION_FILE.exists():
-    access_token = (
-        json.loads(SESSION_FILE.read_text(encoding="utf-8")).get("access_token") or ""
-    ).strip()
-
-if not access_token:
-    raise RuntimeError(
-        "access_token.txt was not found. "
-        "Complete today's Zerodha login first "
-        "(python scripts/zerodha_login.py)."
-    )
-
-# =========================================================
-# CONNECT TO KITE
-# =========================================================
-kite = KiteConnect(api_key=api_key)
-kite.set_access_token(access_token)
+api_key = load_api_key()
+access_token = load_access_token()
+kite = make_kite()
 
 
 # =========================================================

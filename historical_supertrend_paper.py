@@ -36,15 +36,12 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
-import os
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Iterable, Literal, Sequence
 
-from dotenv import load_dotenv
 from kiteconnect import KiteConnect
 from openpyxl import Workbook
 
@@ -56,10 +53,9 @@ from crude_oil_selector import (
     resolve_contract,
     schedule_segments,
 )
+from kite_credentials import make_kite
 
 ROOT = Path(__file__).resolve().parent
-ACCESS_TOKEN_FILE = ROOT / "access_token.txt"
-SESSION_FILE = ROOT / ".kite_session.json"
 
 INTERVAL = "15minute"
 ST_PERIOD = 10
@@ -118,44 +114,6 @@ def unique_file_path(directory: Path, filename: str) -> Path:
         if not candidate.exists():
             return candidate
         n += 1
-
-# ---------------------------------------------------------------------------
-# Credentials / Kite client
-# ---------------------------------------------------------------------------
-def load_api_key() -> str:
-    load_dotenv(ROOT / ".env")
-    api_key = os.getenv("KITE_API_KEY", "").strip()
-    if api_key:
-        return api_key
-    if SESSION_FILE.exists():
-        data = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
-        api_key = (data.get("api_key") or "").strip()
-        if api_key:
-            return api_key
-    raise RuntimeError("KITE_API_KEY is missing from the .env file.")
-
-
-def load_access_token() -> str:
-    if ACCESS_TOKEN_FILE.exists():
-        token = ACCESS_TOKEN_FILE.read_text(encoding="utf-8").strip()
-        if token:
-            return token
-    if SESSION_FILE.exists():
-        data = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
-        token = (data.get("access_token") or "").strip()
-        if token:
-            return token
-    raise RuntimeError(
-        "access_token.txt was not found. "
-        "Complete today's Zerodha login first (python scripts/zerodha_login.py)."
-    )
-
-
-def make_kite() -> KiteConnect:
-    kite = KiteConnect(api_key=load_api_key())
-    kite.set_access_token(load_access_token())
-    return kite
-
 
 # ---------------------------------------------------------------------------
 # Time helpers

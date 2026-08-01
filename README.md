@@ -20,6 +20,34 @@ cp .env.example .env
 # edit .env with KITE_API_KEY and KITE_API_SECRET
 ```
 
+## Credentials
+
+Scripts load Kite auth via `kite_credentials.py` in this order:
+
+| Value | Sources (first match wins) |
+|-------|----------------------------|
+| API key | `KITE_API_KEY` env / `.env` → `.kite_session.json` |
+| Access token | `KITE_ACCESS_TOKEN` env / `.env` → `access_token.txt` → `.kite_session.json` |
+
+**Local (recommended):**
+
+```bash
+python scripts/zerodha_login.py   # browser login → access_token.txt
+python kite_credentials.py        # prints ok/MISSING (no secrets)
+python test_connection.py
+```
+
+**Cloud / Cursor agents:** browser OAuth is not available. On your PC run login once, then set these environment secrets (or put them in `.env` — never commit):
+
+- `KITE_API_KEY`
+- `KITE_ACCESS_TOKEN` (refresh each trading day ~06:00 IST)
+
+Optional check:
+
+```bash
+python kite_credentials.py
+```
+
 ### Run
 
 ```bash

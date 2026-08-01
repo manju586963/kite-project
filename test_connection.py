@@ -1,54 +1,29 @@
 """
 Test Kite Connect without placing orders.
 
-Loads the daily access_token from access_token.txt (or .kite_session.json),
+Loads credentials from env / .env / access_token.txt / .kite_session.json,
 fetches profile + margins, and prints a short connection summary.
 """
 
 from __future__ import annotations
 
-import json
-import os
 import sys
-from pathlib import Path
 
-from dotenv import load_dotenv
-from kiteconnect import KiteConnect
-
-ROOT = Path(__file__).resolve().parent
-TOKEN_FILE = ROOT / "access_token.txt"
-SESSION_FILE = ROOT / ".kite_session.json"
-
-
-def load_access_token() -> str:
-    if TOKEN_FILE.exists():
-        token = TOKEN_FILE.read_text(encoding="utf-8").strip()
-        if token:
-            return token
-
-    if SESSION_FILE.exists():
-        data = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
-        token = (data.get("access_token") or "").strip()
-        if token:
-            return token
-
-    raise RuntimeError(
-        "access_token.txt was not found. Run scripts/zerodha_login.py and log in first."
-    )
+from kite_credentials import credential_status, make_kite
 
 
 def main() -> int:
-    load_dotenv(ROOT / ".env")
+    status = credential_status()
+    if not (status["api_key"] and status["access_token"]):
+        missing = [k for k, ok in status.items() if k != "api_secret" and not ok]
+        raise RuntimeError(
+            "Missing credentials: "
+            + ", ".join(missing)
+            + ". Set KITE_API_KEY and KITE_ACCESS_TOKEN, or run "
+            "python scripts/zerodha_login.py locally."
+        )
 
-    api_key = os.getenv("KITE_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("KITE_API_KEY is missing from the .env file.")
-
-    access_token = load_access_token()
-
-    kite = KiteConnect(api_key=api_key)
-    kite.set_access_token(access_token)
-
+    kite = make_kite()
     profile = kite.profile()
     margins = kite.margins()
 
