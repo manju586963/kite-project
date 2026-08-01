@@ -132,6 +132,8 @@ Outputs are saved under a dated folder in the project main folder (never overwri
 
 `01-aug-2026/`  (re-runs the same day become `01-aug-2026_2`, etc.)
 
+Inside each folder, filenames are also kept unique (`supertrend_signals_2.csv`, …) so nothing is overwritten.
+
 - `supertrend_signals.csv` — candles + Supertrend + BUY/SELL marks
 - `paper_trades.csv` — entry/exit, points, lot P&L, square-offs
 - `paper_trading_summary.txt` — totals, win rate, daily & net paper P&L

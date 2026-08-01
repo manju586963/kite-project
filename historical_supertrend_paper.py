@@ -82,6 +82,26 @@ def make_output_dir(now: datetime | None = None) -> Path:
     path.mkdir(parents=True, exist_ok=False)
     return path
 
+
+def unique_file_path(directory: Path, filename: str) -> Path:
+    """
+    Return a path under directory that does not already exist.
+
+    Example: supertrend_signals.csv → supertrend_signals_2.csv if needed.
+    """
+    candidate = directory / filename
+    if not candidate.exists():
+        return candidate
+
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    n = 2
+    while True:
+        candidate = directory / f"{stem}_{n}{suffix}"
+        if not candidate.exists():
+            return candidate
+        n += 1
+
 # ---------------------------------------------------------------------------
 # Credentials / Kite client
 # ---------------------------------------------------------------------------
@@ -783,9 +803,9 @@ def main(argv: list[str] | None = None) -> int:
     stats = summarize_trades(trades)
 
     output_dir = make_output_dir()
-    signals_file = output_dir / SIGNALS_NAME
-    trades_file = output_dir / TRADES_NAME
-    summary_file = output_dir / SUMMARY_NAME
+    signals_file = unique_file_path(output_dir, SIGNALS_NAME)
+    trades_file = unique_file_path(output_dir, TRADES_NAME)
+    summary_file = unique_file_path(output_dir, SUMMARY_NAME)
 
     write_signals_csv(signals_file, rows, symbol)
     write_trades_csv(trades_file, trades, symbol, lot_size)

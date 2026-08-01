@@ -21,6 +21,7 @@ from historical_supertrend_paper import (  # noqa: E402
     make_output_dir,
     simulate_paper_trades,
     summarize_trades,
+    unique_file_path,
 )
 
 
@@ -178,6 +179,28 @@ class IntradayRuleTests(unittest.TestCase):
         finally:
             shutil.rmtree(first, ignore_errors=True)
             shutil.rmtree(second, ignore_errors=True)
+
+    def test_unique_file_path_never_overwrites(self) -> None:
+        import shutil
+        from historical_supertrend_paper import OUTPUT_ROOT
+
+        folder = make_output_dir(datetime(2026, 8, 2, 10, 0, 0))
+        try:
+            first = unique_file_path(folder, "supertrend_signals.csv")
+            first.write_text("a", encoding="utf-8")
+            second = unique_file_path(folder, "supertrend_signals.csv")
+            second.write_text("b", encoding="utf-8")
+            self.assertEqual(first.name, "supertrend_signals.csv")
+            self.assertEqual(second.name, "supertrend_signals_2.csv")
+            self.assertTrue(first.exists())
+            self.assertTrue(second.exists())
+            self.assertEqual(first.read_text(encoding="utf-8"), "a")
+            self.assertEqual(second.read_text(encoding="utf-8"), "b")
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+            leftover = OUTPUT_ROOT / "02-aug-2026"
+            if leftover.exists() and not any(leftover.iterdir()):
+                leftover.rmdir()
 
 
 if __name__ == "__main__":
