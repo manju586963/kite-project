@@ -207,13 +207,22 @@ def on_noreconnect(ws):
 
 
 def stop_program(signum=None, frame=None):
+    """
+    Clean Ctrl+C shutdown for Twisted/KiteTicker.
+
+    Do not call sys.exit() here — that raises SystemExit inside Twisted's
+    select() loop on Windows and prints "Unexpected error in main loop".
+    """
     print()
     print("Stopping live price feed...")
     try:
         ticker.close()
     except Exception:
         pass
-    sys.exit(0)
+    try:
+        ticker.stop()
+    except Exception:
+        pass
 
 
 ticker.on_connect = on_connect
@@ -224,6 +233,8 @@ ticker.on_reconnect = on_reconnect
 ticker.on_noreconnect = on_noreconnect
 
 signal.signal(signal.SIGINT, stop_program)
+if hasattr(signal, "SIGTERM"):
+    signal.signal(signal.SIGTERM, stop_program)
 
 # =========================================================
 # START
@@ -232,6 +243,9 @@ try:
     ticker.connect(threaded=False)
 except KeyboardInterrupt:
     stop_program()
+except SystemExit:
+    # Raised only if something else calls sys.exit; ignore clean shutdown.
+    pass
 except Exception as error:
     print("Unable to start live feed.")
     print("Error:", error)
