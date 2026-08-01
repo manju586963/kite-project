@@ -51,3 +51,28 @@ User ID: Your ID
 Broker: ZERODHA
 Available margin data received: True
 ```
+
+## Crude Oil contract selector
+
+Automatically picks the active **MCX Crude Oil futures** contract from the live Kite instrument master using a **5-calendar-day** pre-expiry rollover rule (never trades an expired contract; never hard-codes month symbols).
+
+```bash
+python crude_oil_selector.py
+python crude_oil_selector.py --list
+python crude_oil_selector.py --as-of 2026-08-15 --json
+```
+
+Import in other modules:
+
+```python
+from crude_oil_selector import get_active_crude_oil_contract
+
+contract = get_active_crude_oil_contract()
+print(contract.tradingsymbol, contract.instrument_token, contract.expiry)
+```
+
+Unit tests (no network):
+
+```bash
+python -m unittest tests.test_crude_oil_selector -v
+```
