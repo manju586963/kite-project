@@ -112,9 +112,10 @@ Subscribed to: CRUDEOIL26AUGFUT
 
 ## Historical Supertrend paper trading (Step 5 — Intraday Master)
 
-Validates Supertrend **(10, 1)** on historical **15-minute** candles for `config.TRADING_SYMBOL` using an **intraday-only** model:
+Validates Supertrend **(10, 1)** on historical **15-minute Heikin Ashi** candles for `config.TRADING_SYMBOL` using an **intraday-only** model:
 
-- BUY / SELL on Supertrend flips at candle close
+- Raw Kite OHLC is converted to Heikin Ashi before Supertrend
+- BUY / SELL on Supertrend flips at HA candle close
 - Max loss per trade: **125 points** (`MAX_LOSS_STOP`; override with `--max-loss-points`)
 - No new entries after **11:00 PM**
 - Compulsory square-off at **11:15 PM** (`INTRADAY_SQUARE_OFF`)

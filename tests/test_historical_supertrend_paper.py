@@ -21,6 +21,7 @@ from historical_supertrend_paper import (  # noqa: E402
     make_output_dir,
     simulate_paper_trades,
     summarize_trades,
+    to_heikin_ashi,
     unique_file_path,
 )
 

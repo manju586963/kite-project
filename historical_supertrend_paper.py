@@ -3,13 +3,14 @@
 Intraday Supertrend paper trading — historical test (Master Version).
 
 Instrument : config.TRADING_SYMBOL (MCX CRUDEOIL August 2026 futures)
-Timeframe  : 15-minute OHLC
+Timeframe  : 15-minute Heikin Ashi candles
 Indicator  : Supertrend (10, 1)
 Mode       : Intraday paper trading only — no Kite order APIs
 
 Rules:
-  - BUY  when Supertrend flips bearish → bullish (at candle close)
-  - SELL when Supertrend flips bullish → bearish (at candle close)
+  - Convert raw OHLC → Heikin Ashi, then run Supertrend on HA candles
+  - BUY  when Supertrend flips bearish → bullish (at HA candle close)
+  - SELL when Supertrend flips bullish → bearish (at HA candle close)
   - BUY  closes SHORT then opens LONG
   - SELL closes LONG then opens SHORT
   - Max loss per trade: 125 points → square off (MAX_LOSS_STOP)
@@ -185,6 +186,43 @@ class CandleST(Candle):
     supertrend: float | None = None
     direction: Direction | None = None
     signal: Side | None = None
+
+
+def to_heikin_ashi(candles: Sequence[Candle]) -> list[Candle]:
+    """
+    Convert standard OHLC candles to Heikin Ashi.
+
+    HA_Close = (O + H + L + C) / 4
+    HA_Open  = (prev_HA_Open + prev_HA_Close) / 2
+               first bar uses (O + C) / 2
+    HA_High  = max(H, HA_Open, HA_Close)
+    HA_Low   = min(L, HA_Open, HA_Close)
+    """
+    if not candles:
+        return []
+
+    ha: list[Candle] = []
+    for i, c in enumerate(candles):
+        ha_close = (c.open + c.high + c.low + c.close) / 4.0
+        if i == 0:
+            ha_open = (c.open + c.close) / 2.0
+        else:
+            prev = ha[i - 1]
+            ha_open = (prev.open + prev.close) / 2.0
+        ha_high = max(c.high, ha_open, ha_close)
+        ha_low = min(c.low, ha_open, ha_close)
+        ha.append(
+            Candle(
+                date=c.date,
+                open=ha_open,
+                high=ha_high,
+                low=ha_low,
+                close=ha_close,
+                volume=c.volume,
+                oi=c.oi,
+            )
+        )
+    return ha
 
 
 def true_range(high: float, low: float, prev_close: float) -> float:
@@ -576,10 +614,10 @@ def write_signals_csv(path: Path, rows: Sequence[CandleST], symbol: str) -> None
             [
                 "datetime",
                 "symbol",
-                "open",
-                "high",
-                "low",
-                "close",
+                "ha_open",
+                "ha_high",
+                "ha_low",
+                "ha_close",
                 "volume",
                 "atr",
                 "supertrend",
@@ -675,8 +713,8 @@ def write_summary(
         "",
         f"Symbol              : {symbol}",
         f"Instrument token    : {token}",
-        f"Interval            : {INTERVAL}",
-        f"Supertrend          : ({ST_PERIOD}, {ST_MULTIPLIER:g})",
+        f"Interval            : {INTERVAL} (Heikin Ashi)",
+        f"Supertrend          : ({ST_PERIOD}, {ST_MULTIPLIER:g}) on Heikin Ashi",
         f"Style               : Intraday (daily square-off)",
         f"Max loss / trade    : {max_loss_points:g} points "
         f"(max paper loss {max_loss_points:g} × lot_size)",
@@ -702,7 +740,8 @@ def write_summary(
         "",
         "Notes:",
         "- Paper trading only. No real orders were placed.",
-        "- Entry uses signal candle close; MAX_LOSS_STOP fills exactly at the stop price.",
+        "- Candles are Heikin Ashi conversions of Kite 15-minute OHLC.",
+        "- Entry uses HA signal candle close; MAX_LOSS_STOP fills at the HA stop price.",
         "- LONG stop = entry − max-loss points; SHORT stop = entry + max-loss points.",
         "- Stop-loss is checked before candle-close reversal signals.",
         "- Each day starts FLAT; overnight positions are not permitted.",
@@ -733,7 +772,7 @@ def write_summary(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Intraday Supertrend (10,1) historical paper trading on 15-minute candles"
+            "Intraday Supertrend (10,1) on Heikin Ashi 15-minute candles"
         )
     )
     parser.add_argument(
@@ -795,8 +834,8 @@ def main(argv: list[str] | None = None) -> int:
     print("INTRADAY SUPERTREND PAPER TRADING")
     print("========================================")
     print(f"Symbol       : {symbol}")
-    print(f"Interval     : {INTERVAL}")
-    print(f"Supertrend   : ({ST_PERIOD}, {ST_MULTIPLIER:g})")
+    print(f"Interval     : {INTERVAL} (Heikin Ashi)")
+    print(f"Supertrend   : ({ST_PERIOD}, {ST_MULTIPLIER:g}) on HA")
     print(f"No entries   : after {NO_NEW_ENTRY_AFTER.strftime('%I:%M %p')}")
     print(f"Square-off   : {SQUARE_OFF_AT.strftime('%I:%M %p')}")
     print(f"Max loss     : {args.max_loss_points:g} points / trade")
@@ -846,9 +885,11 @@ def main(argv: list[str] | None = None) -> int:
             f"Not enough candles ({len(candles)}) to compute Supertrend({ST_PERIOD})."
         )
 
-    print(f"Candles loaded: {len(candles)}")
-    print("Computing Supertrend (10,1)...")
-    all_rows = compute_supertrend(candles, ST_PERIOD, ST_MULTIPLIER)
+    print(f"Candles loaded: {len(candles)} (raw OHLC)")
+    print("Converting to Heikin Ashi...")
+    ha_candles = to_heikin_ashi(candles)
+    print("Computing Supertrend (10,1) on Heikin Ashi...")
+    all_rows = compute_supertrend(ha_candles, ST_PERIOD, ST_MULTIPLIER)
 
     # Supertrend uses full history for warm-up; simulate only the test window.
     rows = filter_last_trading_days(all_rows, args.trading_days)
