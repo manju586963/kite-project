@@ -1,0 +1,17 @@
+.env
+.kite_session.json
+access_token.txt
+tests/_sample_instruments.csv
+supertrend_signals.csv
+paper_trades.csv
+paper_trading_summary.txt
+output data/
+# Dated paper-trading run folders, e.g. 01-aug-2026/
+[0-9][0-9]-[a-z][a-z][a-z]-[0-9][0-9][0-9][0-9]/
+[0-9][0-9]-[a-z][a-z][a-z]-[0-9][0-9][0-9][0-9]_[0-9]*/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
