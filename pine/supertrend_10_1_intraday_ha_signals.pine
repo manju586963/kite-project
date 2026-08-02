@@ -26,6 +26,7 @@ strategy(
      slippage                = 0
 )
 
+// Timezone literal must stay inline in input.time(defval=...) so the value is const.
 string TZ = "Asia/Kolkata"
 
 //──────────────────────────────────────────────────────────────────────────────
@@ -33,13 +34,13 @@ string TZ = "Asia/Kolkata"
 //──────────────────────────────────────────────────────────────────────────────
 
 startDate = input.time(
-     timestamp(TZ, 2025, 6, 1, 0, 0),
+     timestamp("Asia/Kolkata", 2025, 6, 1, 0, 0),
      "Backtest Start Date",
      group = "Backtest Period"
 )
 
 endDate = input.time(
-     timestamp(TZ, 2025, 6, 30, 23, 59),
+     timestamp("Asia/Kolkata", 2025, 6, 30, 23, 59),
      "Backtest End Date",
      group = "Backtest Period"
 )
