@@ -1,0 +1,319 @@
+//@version=6
+// MCX Crude Oil — Heikin Ashi Supertrend Intraday
+//
+// How to use in TradingView:
+//   1. Open a CRUDEOIL chart (e.g. MCX:CRUDEOIL1! continuous) on the 15-minute timeframe
+//   2. Keep chart type on normal Candles (NOT Heikin Ashi)
+//   3. Pine Editor → paste this script → Add to chart
+//   4. Strategy Tester → set Backtest Start/End under Inputs (defaults Jan–Dec 2026)
+//
+// Signals use Heikin Ashi Supertrend (10, 1) internally.
+// Orders fill on normal candle closes (process_orders_on_close = true).
+
+strategy(
+     title                   = "MCX Crude Oil — Heikin Ashi Supertrend Intraday",
+     shorttitle              = "HA ST Intraday",
+     overlay                 = true,
+     pyramiding              = 0,
+     process_orders_on_close = true,
+     calc_on_every_tick      = false,
+     initial_capital         = 1000000,
+     default_qty_type        = strategy.fixed,
+     default_qty_value       = 1,
+     commission_type         = strategy.commission.cash_per_contract,
+     commission_value        = 0,
+     slippage                = 0
+)
+
+//──────────────────────────────────────────────────────────────────────────────
+// BACKTEST PERIOD
+// Change dates from Strategy Settings → Inputs
+//──────────────────────────────────────────────────────────────────────────────
+
+string TZ = "Asia/Kolkata"
+
+startDate = input.time(
+     timestamp(TZ, 2026, 1, 1, 0, 0),
+     "Backtest Start Date",
+     group = "Backtest Period"
+)
+
+endDate = input.time(
+     timestamp(TZ, 2026, 12, 31, 23, 59),
+     "Backtest End Date",
+     group = "Backtest Period"
+)
+
+inDateRange = time >= startDate and time <= endDate
+
+//──────────────────────────────────────────────────────────────────────────────
+// STRATEGY SETTINGS
+//──────────────────────────────────────────────────────────────────────────────
+
+atrPeriod = input.int(
+     10,
+     "Supertrend ATR Period",
+     minval = 1,
+     group = "Supertrend"
+)
+
+factor = input.float(
+     1.0,
+     "Supertrend Multiplier",
+     minval = 0.1,
+     step = 0.1,
+     group = "Supertrend"
+)
+
+// Fixed at exactly one lot
+quantity = input.int(
+     1,
+     "Quantity (lots)",
+     minval = 1,
+     group = "Position"
+)
+
+maxLossPoints = input.float(
+     125.0,
+     "Max Loss Stop (points, 0 = off)",
+     minval = 0.0,
+     step = 1.0,
+     group = "Risk",
+     tooltip = "Square off if unrealized loss reaches this many points. Matches paper-trading MAX_LOSS_STOP."
+)
+
+// Fresh daily entry after the first completed 15-minute candle
+entryHour = input.int(
+     9,
+     "Fresh Entry Hour",
+     minval = 0,
+     maxval = 23,
+     group = "Session (IST)"
+)
+
+entryMinute = input.int(
+     15,
+     "Fresh Entry Minute",
+     minval = 0,
+     maxval = 59,
+     group = "Session (IST)"
+)
+
+// Mandatory intraday square-off
+squareOffHour = input.int(
+     23,
+     "Square-Off Hour",
+     minval = 0,
+     maxval = 23,
+     group = "Session (IST)"
+)
+
+squareOffMinute = input.int(
+     15,
+     "Square-Off Minute",
+     minval = 0,
+     maxval = 59,
+     group = "Session (IST)"
+)
+
+// Warn if chart is not 15-minute (strategy timing assumes 15m bars)
+if barstate.isfirst and timeframe.period != "15"
+    runtime.error("Use the 15-minute chart timeframe for this strategy.")
+
+//──────────────────────────────────────────────────────────────────────────────
+// HEIKIN ASHI SUPERTREND
+//
+// Keep the TradingView chart on normal Candles.
+// Heikin Ashi prices are used internally only for Supertrend signals.
+// Orders are simulated using normal market prices.
+//──────────────────────────────────────────────────────────────────────────────
+
+heikinAshiTicker = ticker.heikinashi(syminfo.tickerid)
+
+[supertrendValue, supertrendDirection] = request.security(
+     heikinAshiTicker,
+     timeframe.period,
+     ta.supertrend(factor, atrPeriod),
+     gaps = barmerge.gaps_off,
+     lookahead = barmerge.lookahead_off
+)
+
+// TradingView Supertrend convention:
+// Direction below zero = bullish
+// Direction above zero = bearish
+
+bullishTrend = supertrendDirection < 0
+bearishTrend = supertrendDirection > 0
+
+bullishFlip =
+     bullishTrend and
+     supertrendDirection[1] > 0
+
+bearishFlip =
+     bearishTrend and
+     supertrendDirection[1] < 0
+
+//──────────────────────────────────────────────────────────────────────────────
+// TIME CONDITIONS — INDIA STANDARD TIME
+//──────────────────────────────────────────────────────────────────────────────
+
+barCloseHour = hour(time_close, TZ)
+barCloseMinute = minute(time_close, TZ)
+
+freshEntryTime =
+     barCloseHour == entryHour and
+     barCloseMinute == entryMinute
+
+squareOffTime =
+     barCloseHour == squareOffHour and
+     barCloseMinute == squareOffMinute
+
+beforeSquareOff =
+     barCloseHour < squareOffHour or
+     (
+         barCloseHour == squareOffHour and
+         barCloseMinute < squareOffMinute
+     )
+
+confirmedBar = barstate.isconfirmed
+
+//──────────────────────────────────────────────────────────────────────────────
+// FRESH DAILY ENTRY
+//
+// At 09:15 IST:
+// Bullish Supertrend → enter long
+// Bearish Supertrend → enter short
+//──────────────────────────────────────────────────────────────────────────────
+
+freshLongEntry =
+     confirmedBar and
+     inDateRange and
+     freshEntryTime and
+     strategy.position_size == 0 and
+     bullishTrend
+
+freshShortEntry =
+     confirmedBar and
+     inDateRange and
+     freshEntryTime and
+     strategy.position_size == 0 and
+     bearishTrend
+
+if freshLongEntry
+    strategy.entry(
+         id = "Long",
+         direction = strategy.long,
+         qty = quantity,
+         comment = "Fresh Long Entry"
+    )
+
+if freshShortEntry
+    strategy.entry(
+         id = "Short",
+         direction = strategy.short,
+         qty = quantity,
+         comment = "Fresh Short Entry"
+    )
+
+//──────────────────────────────────────────────────────────────────────────────
+// SUPERTREND REVERSALS
+//
+// Bullish flip → reverse to long
+// Bearish flip → reverse to short
+// strategy.entry automatically reverses the existing opposite position.
+//──────────────────────────────────────────────────────────────────────────────
+
+if confirmedBar and inDateRange and beforeSquareOff and bullishFlip
+    strategy.entry(
+         id = "Long",
+         direction = strategy.long,
+         qty = quantity,
+         comment = "Bullish Supertrend Flip"
+    )
+
+if confirmedBar and inDateRange and beforeSquareOff and bearishFlip
+    strategy.entry(
+         id = "Short",
+         direction = strategy.short,
+         qty = quantity,
+         comment = "Bearish Supertrend Flip"
+    )
+
+//──────────────────────────────────────────────────────────────────────────────
+// MAX LOSS STOP (points)
+//──────────────────────────────────────────────────────────────────────────────
+
+longStopHit =
+     maxLossPoints > 0 and
+     strategy.position_size > 0 and
+     (strategy.position_avg_price - close) >= maxLossPoints
+
+shortStopHit =
+     maxLossPoints > 0 and
+     strategy.position_size < 0 and
+     (close - strategy.position_avg_price) >= maxLossPoints
+
+if confirmedBar and inDateRange and beforeSquareOff and (longStopHit or shortStopHit)
+    strategy.close_all(comment = "Max Loss Stop")
+
+//──────────────────────────────────────────────────────────────────────────────
+// INTRADAY SQUARE-OFF
+//──────────────────────────────────────────────────────────────────────────────
+
+if confirmedBar and squareOffTime and strategy.position_size != 0
+    strategy.close_all(
+         comment = "Intraday Square-Off"
+    )
+
+// Close any remaining position after the selected backtest period
+if time > endDate and strategy.position_size != 0
+    strategy.close_all(
+         comment = "Backtest Period End"
+    )
+
+//──────────────────────────────────────────────────────────────────────────────
+// CHART DISPLAY
+//──────────────────────────────────────────────────────────────────────────────
+
+plot(
+     bullishTrend ? supertrendValue : na,
+     title = "Bullish Supertrend",
+     color = color.green,
+     linewidth = 2,
+     style = plot.style_linebr
+)
+
+plot(
+     bearishTrend ? supertrendValue : na,
+     title = "Bearish Supertrend",
+     color = color.red,
+     linewidth = 2,
+     style = plot.style_linebr
+)
+
+plotshape(
+     bullishFlip and inDateRange,
+     title = "Buy Signal",
+     text = "BUY",
+     style = shape.labelup,
+     location = location.belowbar,
+     color = color.green,
+     textcolor = color.white,
+     size = size.tiny
+)
+
+plotshape(
+     bearishFlip and inDateRange,
+     title = "Sell Signal",
+     text = "SELL",
+     style = shape.labeldown,
+     location = location.abovebar,
+     color = color.red,
+     textcolor = color.white,
+     size = size.tiny
+)
+
+bgcolor(
+     inDateRange ? na : color.new(color.gray, 92),
+     title = "Outside Backtest Period"
+)

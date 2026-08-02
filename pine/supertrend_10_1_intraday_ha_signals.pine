@@ -1,0 +1,197 @@
+//@version=6
+// Supertrend (10,1) Intraday — Heikin Ashi signals, normal-candle fills
+//
+// How to use:
+//   1. Chart type: Candles (NOT Heikin Ashi)
+//   2. Timeframe: 15 minutes
+//   3. Symbol: e.g. MCX:CRUDEOIL1! (or the Aug contract you trade)
+//   4. Pine Editor → Add to chart → Strategy Tester
+//
+// Signals: Supertrend(10,1) on Heikin Ashi (via request.security)
+// Fills:   normal chart OHLC (process_orders_on_close = true)
+// Risk:    125-point stop + 23:15 IST square-off
+
+strategy(
+     title                   = "Supertrend (10,1) Intraday Strategy — HA Signals",
+     shorttitle              = "ST HA Intraday",
+     overlay                 = true,
+     pyramiding              = 0,
+     process_orders_on_close = true,
+     calc_on_every_tick      = false,
+     initial_capital         = 1000000,
+     default_qty_type        = strategy.fixed,
+     default_qty_value       = 1,
+     commission_type         = strategy.commission.cash_per_contract,
+     commission_value        = 0,
+     slippage                = 0
+)
+
+string TZ = "Asia/Kolkata"
+
+//──────────────────────────────────────────────────────────────────────────────
+// INPUTS
+//──────────────────────────────────────────────────────────────────────────────
+
+startDate = input.time(
+     timestamp(TZ, 2025, 6, 1, 0, 0),
+     "Backtest Start Date",
+     group = "Backtest Period"
+)
+
+endDate = input.time(
+     timestamp(TZ, 2025, 6, 30, 23, 59),
+     "Backtest End Date",
+     group = "Backtest Period"
+)
+
+atrPeriod = input.int(10, "Supertrend ATR Period", minval = 1, group = "Supertrend")
+factor    = input.float(1.0, "Supertrend Multiplier", minval = 0.1, step = 0.1, group = "Supertrend")
+
+quantity = input.int(1, "Quantity (lots)", minval = 1, group = "Position")
+
+maxLossPoints = input.float(
+     125.0,
+     "Max Loss Stop (points)",
+     minval = 0.0,
+     step = 1.0,
+     group = "Risk",
+     tooltip = "LONG stop = entry − N; SHORT stop = entry + N. Set 0 to disable."
+)
+
+squareOffHour   = input.int(23, "Square-Off Hour (IST)", minval = 0, maxval = 23, group = "Session")
+squareOffMinute = input.int(15, "Square-Off Minute (IST)", minval = 0, maxval = 59, group = "Session")
+
+if barstate.isfirst and timeframe.period != "15"
+    runtime.error("Use the 15-minute chart timeframe for this strategy.")
+
+//──────────────────────────────────────────────────────────────────────────────
+// DATE / SESSION
+//──────────────────────────────────────────────────────────────────────────────
+
+inDateRange = time >= startDate and time_close <= endDate
+
+barCloseHour   = hour(time_close, TZ)
+barCloseMinute = minute(time_close, TZ)
+
+squareOffTime =
+     barCloseHour == squareOffHour and
+     barCloseMinute == squareOffMinute
+
+beforeSquareOff =
+     barCloseHour < squareOffHour or
+     (
+         barCloseHour == squareOffHour and
+         barCloseMinute < squareOffMinute
+     )
+
+//──────────────────────────────────────────────────────────────────────────────
+// HEIKIN ASHI SUPERTREND (signals only)
+// Keep chart on normal Candles. HA is used only inside request.security.
+//──────────────────────────────────────────────────────────────────────────────
+
+heikinAshiTicker = ticker.heikinashi(syminfo.tickerid)
+
+[st, dir] = request.security(
+     heikinAshiTicker,
+     timeframe.period,
+     ta.supertrend(factor, atrPeriod),
+     gaps = barmerge.gaps_off,
+     lookahead = barmerge.lookahead_off
+)
+
+// TV Supertrend: dir < 0 bullish, dir > 0 bearish
+longSignal =
+     inDateRange and
+     beforeSquareOff and
+     barstate.isconfirmed and
+     dir < 0 and
+     dir[1] > 0
+
+shortSignal =
+     inDateRange and
+     beforeSquareOff and
+     barstate.isconfirmed and
+     dir > 0 and
+     dir[1] < 0
+
+//──────────────────────────────────────────────────────────────────────────────
+// ENTRIES — reverse on every Supertrend flip (fills on normal candle close)
+//──────────────────────────────────────────────────────────────────────────────
+
+if longSignal
+    strategy.entry("Long", strategy.long, qty = quantity, comment = "HA ST Bullish Flip")
+
+if shortSignal
+    strategy.entry("Short", strategy.short, qty = quantity, comment = "HA ST Bearish Flip")
+
+//──────────────────────────────────────────────────────────────────────────────
+// MAX LOSS STOP — 125 actual price points (on normal chart price)
+//──────────────────────────────────────────────────────────────────────────────
+
+if maxLossPoints > 0 and strategy.position_size > 0
+    strategy.exit(
+         "Long SL",
+         from_entry = "Long",
+         stop = strategy.position_avg_price - maxLossPoints
+    )
+
+if maxLossPoints > 0 and strategy.position_size < 0
+    strategy.exit(
+         "Short SL",
+         from_entry = "Short",
+         stop = strategy.position_avg_price + maxLossPoints
+    )
+
+//──────────────────────────────────────────────────────────────────────────────
+// INTRADAY SQUARE-OFF + END OF BACKTEST
+//──────────────────────────────────────────────────────────────────────────────
+
+if barstate.isconfirmed and squareOffTime and strategy.position_size != 0
+    strategy.close_all(comment = "Intraday Square-off")
+
+if time > endDate and strategy.position_size != 0
+    strategy.close_all(comment = "End of Backtest")
+
+//──────────────────────────────────────────────────────────────────────────────
+// PLOTS
+//──────────────────────────────────────────────────────────────────────────────
+
+plot(
+     dir < 0 ? st : na,
+     title = "Bullish Supertrend (HA)",
+     color = color.green,
+     linewidth = 2,
+     style = plot.style_linebr
+)
+
+plot(
+     dir > 0 ? st : na,
+     title = "Bearish Supertrend (HA)",
+     color = color.red,
+     linewidth = 2,
+     style = plot.style_linebr
+)
+
+plotshape(
+     longSignal,
+     title = "Buy",
+     text = "BUY",
+     style = shape.labelup,
+     location = location.belowbar,
+     color = color.green,
+     textcolor = color.white,
+     size = size.tiny
+)
+
+plotshape(
+     shortSignal,
+     title = "Sell",
+     text = "SELL",
+     style = shape.labeldown,
+     location = location.abovebar,
+     color = color.red,
+     textcolor = color.white,
+     size = size.tiny
+)
+
+bgcolor(inDateRange ? na : color.new(color.gray, 92), title = "Outside Backtest Period")
